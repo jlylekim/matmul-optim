@@ -28,10 +28,32 @@ The core solver (`GEMM-IPM`) avoids sparse/direct factorization and is optimized
 
 ## Quickstart
 
+Option A: `conda`
+
 ```bash
 conda env create -f environment.yml
 conda activate gemm-kkt
 pip install -e .[test]
+pytest
+```
+
+Option B: Python `venv` (no conda, Python 3.10+)
+
+```bash
+bash scripts/setup_venv.sh
+source .venv/bin/activate
+pytest
+```
+
+Manual `venv` setup:
+
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+# CUDA 12.4 wheels (use cpu instead of cu124 for CPU-only):
+python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+python -m pip install -e ".[test]"
 pytest
 ```
 
