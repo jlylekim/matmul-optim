@@ -1,0 +1,21 @@
+name: gemm-kkt
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch>=2.2
+  - pytorch-cuda=12.1
+  - numpy>=1.26
+  - scipy>=1.11
+  - matplotlib>=3.8
+  - pandas>=2.2
+  - tabulate>=0.9
+  - pydantic>=2.6
+  - tqdm>=4.66
+  - pip:
+      - -e .
+      - pytest>=8.0
+      - pytest-cov>=4.1
