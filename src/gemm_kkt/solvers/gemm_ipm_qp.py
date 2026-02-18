@@ -37,6 +37,8 @@ class GEMMIPMConfig:
     precision: Literal["fp32", "fp16", "bf16"] = "bf16"
     denom_floor: float = 1e-6
     direction_clip: float = 1e6
+    init_strategy: Literal["zero", "least_squares"] = "least_squares"
+    init_regularization: float = 1e-3
 
 
 class GemmIPMQPSolver:
@@ -78,6 +80,29 @@ class GemmIPMQPSolver:
             return 1.0
         alpha = torch.min((-s[mask] / ds[mask]).clamp_min(0.0))
         return float(min(1.0, self.config.line_search_backoff * alpha.item()))
+
+    def _initialize_primal(self, A: torch.Tensor, l: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        B = l.shape[0]
+        n = A.shape[-1]
+        mid = 0.5 * (l + u)
+        I = batch_eye(B, n, device=mid.device, dtype=mid.dtype)
+        reg = max(self.config.init_regularization, 1e-8)
+
+        try:
+            if A.dim() == 2:
+                At = A.transpose(0, 1)
+                AtA = torch.einsum("im,mj->ij", At, A).unsqueeze(0).expand(B, -1, -1)
+                Atb = torch.einsum("im,bm->bi", At, mid).unsqueeze(-1)
+            else:
+                At = A.transpose(1, 2)
+                AtA = torch.bmm(At, A)
+                Atb = torch.bmm(At, mid.unsqueeze(-1))
+            x0 = torch.linalg.solve(AtA + reg * I, Atb).squeeze(-1)
+            if torch.isfinite(x0).all().item():
+                return x0
+        except RuntimeError:
+            pass
+        return torch.zeros(B, n, device=mid.device, dtype=mid.dtype)
 
     def _kkt_solve(self, M: torch.Tensor, rhs: torch.Tensor, compute_dtype: torch.dtype) -> tuple[torch.Tensor, float, str, dict[str, float]]:
         cfg = self.config
@@ -181,7 +206,10 @@ class GemmIPMQPSolver:
         l = p.l.float()
         u = p.u.float()
 
-        x = torch.zeros(B, n, device=device, dtype=torch.float32)
+        if self.config.init_strategy == "least_squares":
+            x = self._initialize_primal(A, l, u)
+        else:
+            x = torch.zeros(B, n, device=device, dtype=torch.float32)
         lam_l = torch.ones(B, m, device=device, dtype=torch.float32)
         lam_u = torch.ones(B, m, device=device, dtype=torch.float32)
 

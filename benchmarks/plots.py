@@ -46,22 +46,22 @@ def write_accuracy_time_summary(df: pd.DataFrame, out_dir: Path) -> None:
         rows.append(
             {
                 "solver": solver,
-                "count": int(len(g)),
-                "solved_status_count": int(solved.sum()) if not solved.empty else 0,
-                "median_time_s": float(np.median(times)) if len(times) > 0 else np.nan,
-                "mean_time_s": float(times.mean()) if len(times) > 0 else np.nan,
-                "std_time_s": float(times.std(ddof=0)) if len(times) > 1 else 0.0,
-                "mean_primal_residual": float(primal.mean()) if len(primal) > 0 else np.nan,
-                "std_primal_residual": float(primal.std(ddof=0)) if len(primal) > 1 else 0.0,
-                "mean_dual_residual": float(dual.mean()) if len(dual) > 0 else np.nan,
-                "std_dual_residual": float(dual.std(ddof=0)) if len(dual) > 1 else 0.0,
-                "mean_duality_gap": float(gap.mean()) if len(gap) > 0 else np.nan,
-                "std_duality_gap": float(gap.std(ddof=0)) if len(gap) > 1 else 0.0,
+                "n": int(len(g)),
+                "solved": int(solved.sum()) if not solved.empty else 0,
+                "t_med_s": float(np.median(times)) if len(times) > 0 else np.nan,
+                "t_mean_s": float(times.mean()) if len(times) > 0 else np.nan,
+                "t_std_s": float(times.std(ddof=0)) if len(times) > 1 else 0.0,
+                "p_mean": float(primal.mean()) if len(primal) > 0 else np.nan,
+                "p_std": float(primal.std(ddof=0)) if len(primal) > 1 else 0.0,
+                "d_mean": float(dual.mean()) if len(dual) > 0 else np.nan,
+                "d_std": float(dual.std(ddof=0)) if len(dual) > 1 else 0.0,
+                "g_mean": float(gap.mean()) if len(gap) > 0 else np.nan,
+                "g_std": float(gap.std(ddof=0)) if len(gap) > 1 else 0.0,
             }
         )
 
-    sdf = pd.DataFrame(rows).sort_values("median_time_s")
-    sdf.to_markdown(out_dir / "summary_table.md", index=False)
+    sdf = pd.DataFrame(rows).sort_values("t_med_s")
+    sdf.to_markdown(out_dir / "summary_table.md", index=False, floatfmt=".4g")
     (out_dir / "summary_table.tex").write_text(
         sdf.to_latex(index=False, float_format=lambda x: f"{x:.4g}"),
         encoding="utf-8",

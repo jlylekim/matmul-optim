@@ -154,6 +154,147 @@ def _baseline_to_record(
 
 
 def _make_main_configs(device: str, seed: int, preset: str) -> list[DenseParametricQPConfig]:
+    if preset == "ns_favor":
+        return [
+            DenseParametricQPConfig(
+                batch_size=256,
+                n=128,
+                m=256,
+                condition_number=5e2,
+                tightness=0.7,
+                rhs_count=16,
+                shared_matrices=True,
+                seed=seed,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=128,
+                n=256,
+                m=512,
+                condition_number=1e3,
+                tightness=0.6,
+                rhs_count=12,
+                shared_matrices=True,
+                seed=seed + 1,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=96,
+                n=320,
+                m=640,
+                condition_number=2e3,
+                tightness=0.5,
+                rhs_count=10,
+                shared_matrices=True,
+                seed=seed + 2,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=64,
+                n=384,
+                m=768,
+                condition_number=3e3,
+                tightness=0.45,
+                rhs_count=8,
+                shared_matrices=True,
+                seed=seed + 3,
+                device=device,
+            ),
+        ]
+    if preset == "mixed":
+        return [
+            DenseParametricQPConfig(
+                batch_size=192,
+                n=128,
+                m=256,
+                condition_number=1e3,
+                tightness=0.6,
+                rhs_count=8,
+                shared_matrices=True,
+                seed=seed,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=128,
+                n=256,
+                m=512,
+                condition_number=1e4,
+                tightness=0.35,
+                rhs_count=6,
+                shared_matrices=True,
+                seed=seed + 1,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=80,
+                n=384,
+                m=768,
+                condition_number=5e4,
+                tightness=0.25,
+                rhs_count=4,
+                shared_matrices=True,
+                seed=seed + 2,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=64,
+                n=512,
+                m=1024,
+                condition_number=1e5,
+                tightness=0.2,
+                rhs_count=3,
+                shared_matrices=True,
+                seed=seed + 3,
+                device=device,
+            ),
+        ]
+    if preset == "stress":
+        return [
+            DenseParametricQPConfig(
+                batch_size=128,
+                n=256,
+                m=512,
+                condition_number=1e5,
+                tightness=0.2,
+                rhs_count=4,
+                shared_matrices=True,
+                seed=seed,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=96,
+                n=384,
+                m=768,
+                condition_number=3e5,
+                tightness=0.15,
+                rhs_count=3,
+                shared_matrices=True,
+                seed=seed + 1,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=64,
+                n=512,
+                m=1024,
+                condition_number=7e5,
+                tightness=0.12,
+                rhs_count=2,
+                shared_matrices=True,
+                seed=seed + 2,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=48,
+                n=640,
+                m=1280,
+                condition_number=1e6,
+                tightness=0.1,
+                rhs_count=2,
+                shared_matrices=True,
+                seed=seed + 3,
+                device=device,
+            ),
+        ]
     if preset == "large":
         return [
             DenseParametricQPConfig(batch_size=128, n=256, m=512, rhs_count=4, shared_matrices=True, seed=seed, device=device),
@@ -168,6 +309,11 @@ def _make_main_configs(device: str, seed: int, preset: str) -> list[DenseParamet
 
 
 def _make_portfolio_configs(device: str, seed: int, preset: str) -> list[PortfolioQPConfig]:
+    if preset in ("ns_favor", "mixed", "stress"):
+        return [
+            PortfolioQPConfig(batch_size=128, n_assets=256, n_factors=12, seed=seed + 10, device=device),
+            PortfolioQPConfig(batch_size=96, n_assets=384, n_factors=16, seed=seed + 11, device=device),
+        ]
     if preset == "large":
         return [
             PortfolioQPConfig(batch_size=128, n_assets=256, n_factors=12, seed=seed + 10, device=device),
@@ -180,6 +326,11 @@ def _make_portfolio_configs(device: str, seed: int, preset: str) -> list[Portfol
 
 
 def _make_lp_configs(device: str, seed: int, preset: str) -> list[BatchedLPConfig]:
+    if preset in ("ns_favor", "mixed", "stress"):
+        return [
+            BatchedLPConfig(batch_size=256, n=512, m=256, seed=seed + 20, device=device),
+            BatchedLPConfig(batch_size=192, n=768, m=384, seed=seed + 21, device=device),
+        ]
     if preset == "large":
         return [
             BatchedLPConfig(batch_size=256, n=512, m=256, seed=seed + 20, device=device),
@@ -459,6 +610,10 @@ def _maybe_autolaunch_torchrun(args: argparse.Namespace) -> None:
         str(args.ns_grid_tune_batch),
         "--ns-grid-tune-iters",
         str(args.ns_grid_tune_iters),
+        "--target-tol",
+        str(args.target_tol),
+        "--max-iter-scale",
+        str(args.max_iter_scale),
     ]
     if args.disable_ns_grid_search:
         cmd.append("--disable-ns-grid-search")
@@ -478,9 +633,9 @@ def main() -> None:
     parser.add_argument(
         "--preset",
         type=str,
-        choices=["quick", "large"],
+        choices=["quick", "large", "ns_favor", "mixed", "stress"],
         default="quick",
-        help="Experiment preset size; `large` increases dimensions/batches for GPU-throughput studies",
+        help="Experiment preset (`ns_favor`/`mixed`/`stress` recommended for discovery sweeps)",
     )
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
@@ -501,7 +656,7 @@ def main() -> None:
         "--eval-tiers",
         type=float,
         nargs="*",
-        default=[1e-2, 1e-3, 1e-4],
+        default=[1e-1, 5e-2, 1e-2],
         help="Tolerance tiers used for standardized pass/fail reporting",
     )
     parser.add_argument(
@@ -527,6 +682,18 @@ def main() -> None:
         default=40,
         help="Max IPM iterations used during NS-IPM tuning",
     )
+    parser.add_argument(
+        "--target-tol",
+        type=float,
+        default=1e-2,
+        help="Target solver tolerance (used for primal/dual/gap stopping)",
+    )
+    parser.add_argument(
+        "--max-iter-scale",
+        type=float,
+        default=1.5,
+        help="Multiplier applied to default solver iteration budgets",
+    )
     args = parser.parse_args()
 
     _maybe_autolaunch_torchrun(args)
@@ -549,32 +716,38 @@ def main() -> None:
         device = "cpu"
     print(f"[rank-bind] rank={rank} local_rank={local_rank} world_size={world_size} device={device}", flush=True)
     use_cuda = str(device).startswith("cuda")
+    tol = float(args.target_tol)
+    iter_scale = max(float(args.max_iter_scale), 0.1)
 
     base_ipm_ns_cfg = GEMMIPMConfig(
         kkt_mode="ns_only",
         precision="bf16" if use_cuda else "fp32",
-        tol_p=1e-4,
-        tol_d=1e-4,
-        tol_g=1e-4,
-        max_iters=120 if args.preset == "large" else 80,
+        tol_p=tol,
+        tol_d=tol,
+        tol_g=tol,
+        max_iters=max(20, int(round((120 if args.preset == "large" else 80) * iter_scale))),
     )
     base_ipm_rb_cfg = GEMMIPMConfig(
         kkt_mode="robust",
         precision="bf16" if use_cuda else "fp32",
-        tol_p=1e-6,
-        tol_d=1e-6,
-        tol_g=1e-6,
-        max_iters=200 if args.preset == "large" else 120,
+        tol_p=tol,
+        tol_d=tol,
+        tol_g=tol,
+        max_iters=max(20, int(round((200 if args.preset == "large" else 120) * iter_scale))),
     )
     split_cfg = GEMMSplittingQPConfig(
         linear_solver="cg_ns",
-        tol_p=1e-4,
-        tol_d=1e-4,
-        max_iters=50_000 if args.preset == "large" else 20_000,
+        tol_p=tol,
+        tol_d=tol,
+        max_iters=max(2000, int(round((50_000 if args.preset == "large" else 20_000) * iter_scale))),
     )
 
     split = GemmSplittingQPSolver(split_cfg)
-    lp_cfg = LPFirstOrderConfig(max_iters=120_000 if args.preset == "large" else 80_000, tol_p=1e-4, tol_d=1e-4)
+    lp_cfg = LPFirstOrderConfig(
+        max_iters=max(8000, int(round((120_000 if args.preset == "large" else 80_000) * iter_scale))),
+        tol_p=tol,
+        tol_d=tol,
+    )
     lp_solver = LPFirstOrderSolver(lp_cfg)
 
     records: list[Any] = []
@@ -599,7 +772,8 @@ def main() -> None:
     if rank == 0:
         print(
             f"[plan] studies={studies}, preset={args.preset}, world_size={world_size}, "
-            f"planned_experiments={total_experiments} (raw={raw_total_experiments}), rank0_device={device}",
+            f"planned_experiments={total_experiments} (raw={raw_total_experiments}), rank0_device={device}, "
+            f"target_tol={tol:.2e}, max_iter_scale={iter_scale:.2f}",
             flush=True,
         )
     progress = 0
@@ -774,9 +948,10 @@ def main() -> None:
                 if rank == 0:
                     baseline_problem = problem.slice_batch(0, 1).to("cpu")
                     bcfg = BaselineRunConfig(
-                        tol_p=1e-4,
-                        tol_d=1e-4,
-                        max_iters=10000,
+                        tol_p=tol,
+                        tol_d=tol,
+                        tol_g=tol,
+                        max_iters=max(5000, int(round(10000 * iter_scale))),
                         warm_start=False,
                         presolve=True,
                     )
@@ -902,7 +1077,10 @@ def main() -> None:
                 if rank == 0:
                     lp_cpu = lp.slice_batch(0, 1).to("cpu")
                     _log_start("highs_cpu", problem_id)
-                    highs_res = run_highs_lp(lp_cpu, BaselineRunConfig(tol_p=1e-4, tol_d=1e-4, max_iters=100000))
+                    highs_res = run_highs_lp(
+                        lp_cpu,
+                        BaselineRunConfig(tol_p=tol, tol_d=tol, max_iters=max(20000, int(round(100000 * iter_scale)))),
+                    )
                     highs_row = _baseline_to_record(
                         run_id=f"{study}_lp_{idx}_highs_cpu",
                         category="lp",
@@ -910,8 +1088,8 @@ def main() -> None:
                         solver_name="highs_cpu",
                         baseline=highs_res,
                         eval_tiers=args.eval_tiers,
-                        tol_p=1e-4,
-                        tol_d=1e-4,
+                        tol_p=tol,
+                        tol_d=tol,
                         tol_g=None,
                     )
                     if highs_row is not None:

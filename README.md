@@ -69,13 +69,26 @@ Run larger GPU-throughput-oriented suite:
 bash scripts/reproduce_large.sh
 ```
 
+Run overnight discovery sweep (targets ~10 hours by default):
+
+```bash
+bash scripts/reproduce_overnight.sh
+```
+
+Optional time budget override (hours):
+
+```bash
+TARGET_HOURS=8 bash scripts/reproduce_overnight.sh
+```
+
 `benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
 By default, each reproduce invocation is capped at `10` experiments total (`--max-experiments`).
 NS-IPM hyperparameter grid search is enabled by default and can be disabled with `--disable-ns-grid-search`.
+Recommended discovery presets are `ns_favor`, `mixed`, and `stress`.
 To force single-process behavior:
 
 ```bash
-python benchmarks/reproduce.py --output results/manual_run_YYYYmmdd_HHMMSS --study all --no-auto-distributed --max-experiments 10
+python benchmarks/reproduce.py --output results/manual_run_YYYYmmdd_HHMMSS --study all --no-auto-distributed --max-experiments 10 --preset mixed --target-tol 1e-2 --max-iter-scale 2.0
 ```
 
 Benchmark logs include standardized pass/fail tiers at `1e-2`, `1e-3`, and `1e-4`
@@ -92,6 +105,7 @@ Results are written to timestamped directories under `results/` (for example `re
 - JSONL run logs
 - markdown + LaTeX summary table (`summary_table.*`) with accuracy/time only
 - PDF plots (`accuracy_vs_time.pdf`) with accuracy/time only
+- overnight runs additionally save `manifest.csv` and `combined_results.jsonl`
 
 ## Repository layout
 
