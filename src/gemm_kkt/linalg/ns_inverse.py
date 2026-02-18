@@ -105,10 +105,14 @@ def apply_inverse(inv: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
     else:
         rhs3 = rhs
 
+    work_dtype = torch.promote_types(inv.dtype, rhs3.dtype)
+    inv_work = inv.to(dtype=work_dtype)
+    rhs_work = rhs3.to(dtype=work_dtype)
+
     if inv.dim() == 2:
-        out = torch.einsum("ij,bjk->bik", inv, rhs3)
+        out = torch.einsum("ij,bjk->bik", inv_work, rhs_work)
     else:
-        out = torch.bmm(inv, rhs3)
+        out = torch.bmm(inv_work, rhs_work)
 
     if rhs_was_vec:
         return out.squeeze(0).squeeze(-1)

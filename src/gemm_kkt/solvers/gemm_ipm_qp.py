@@ -122,9 +122,7 @@ class GemmIPMQPSolver:
         if use_krylov:
             t0 = time.perf_counter()
 
-            precond = None
-            if inv is not None:
-                precond = lambda v: apply_inverse(inv, v)
+            precond = inv.float() if inv is not None else None
 
             if cfg.krylov_solver == "gmres":
                 dx, _ = batched_gmres(

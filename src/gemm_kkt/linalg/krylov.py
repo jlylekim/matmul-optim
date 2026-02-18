@@ -9,6 +9,7 @@ from gemm_kkt.linalg._ops import as_batched_rhs, batch_matmul, restore_rhs_shape
 
 MatVecFn = Callable[[torch.Tensor], torch.Tensor]
 PrecondFn = Callable[[torch.Tensor], torch.Tensor]
+PrecondArg = PrecondFn | torch.Tensor | None
 
 
 @dataclass
@@ -30,12 +31,41 @@ def _as_matvec(M_or_fn: torch.Tensor | MatVecFn) -> MatVecFn:
     return _mv
 
 
+def _apply_preconditioner(preconditioner: PrecondArg, v: torch.Tensor, *, batch_index: int | None = None) -> torch.Tensor:
+    if preconditioner is None:
+        return v
+
+    if callable(preconditioner):
+        return preconditioner(v)
+
+    P = preconditioner
+    work_dtype = torch.promote_types(P.dtype, v.dtype)
+    P_work = P.to(dtype=work_dtype)
+    v_work = v.to(dtype=work_dtype)
+    if P.dim() == 2:
+        if v_work.dim() == 3:
+            return torch.einsum("ij,bjk->bik", P_work, v_work)
+        return P_work @ v_work
+
+    if P.dim() == 3:
+        if v_work.dim() == 3 and v_work.shape[0] == P_work.shape[0]:
+            return torch.bmm(P_work, v_work)
+        if batch_index is None:
+            raise ValueError("batch_index required for single-system apply with batched preconditioner")
+        Pb = P_work[batch_index]
+        if v_work.dim() == 3:
+            return (Pb @ v_work.squeeze(0)).unsqueeze(0)
+        return Pb @ v_work
+
+    raise ValueError(f"Unsupported preconditioner tensor dimension: {P.dim()}")
+
+
 def batched_cg(
     M_or_fn: torch.Tensor | MatVecFn,
     b: torch.Tensor,
     *,
     x0: torch.Tensor | None = None,
-    preconditioner: PrecondFn | None = None,
+    preconditioner: PrecondArg = None,
     max_iters: int = 200,
     tol: float = 1e-6,
 ) -> tuple[torch.Tensor, KrylovInfo]:
@@ -46,7 +76,7 @@ def batched_cg(
     x = torch.zeros_like(b3) if x0 is None else as_batched_rhs(x0)[0]
 
     r = b3 - mv(x)
-    z = preconditioner(r) if preconditioner is not None else r
+    z = _apply_preconditioner(preconditioner, r).to(dtype=r.dtype)
     p = z.clone()
     rz = (r * z).sum(dim=1, keepdim=True)
 
@@ -70,7 +100,7 @@ def batched_cg(
             iters = k + 1
             break
 
-        z = preconditioner(r) if preconditioner is not None else r
+        z = _apply_preconditioner(preconditioner, r).to(dtype=r.dtype)
         rz_new = (r * z).sum(dim=1, keepdim=True)
         beta = rz_new / rz.clamp_min(1e-20)
         p = z + beta * p
@@ -88,7 +118,7 @@ def batched_gmres(
     b: torch.Tensor,
     *,
     x0: torch.Tensor | None = None,
-    preconditioner: PrecondFn | None = None,
+    preconditioner: PrecondArg = None,
     restart: int = 20,
     max_iters: int = 200,
     tol: float = 1e-6,
@@ -107,12 +137,23 @@ def batched_gmres(
     converged_all = True
     max_used_iters = 0
 
-    def _apply_precond(v: torch.Tensor) -> torch.Tensor:
-        if preconditioner is None:
-            return v
-        return preconditioner(v)
-
     for bi in range(B):
+        if isinstance(M_or_fn, torch.Tensor):
+            M_tensor = M_or_fn
+
+            def _mv_vec(vec: torch.Tensor) -> torch.Tensor:
+                if M_tensor.dim() == 2:
+                    return M_tensor @ vec
+                return M_tensor[bi] @ vec
+
+        else:
+            def _mv_vec(vec: torch.Tensor) -> torch.Tensor:
+                return mv(vec.view(1, n, 1)).view(-1)
+
+        def _apply_precond_vec(vec: torch.Tensor) -> torch.Tensor:
+            out = _apply_preconditioner(preconditioner, vec.view(1, n, 1), batch_index=bi)
+            return out.view(-1).to(dtype=rhs.dtype)
+
         for ri in range(k_rhs):
             rhs = b3[bi, :, ri]
             xi = x[bi, :, ri]
@@ -122,7 +163,7 @@ def batched_gmres(
             solved = False
 
             while iter_count < max_iters and not solved:
-                r0 = rhs - mv(xi.view(1, n, 1)).view(-1)
+                r0 = rhs - _mv_vec(xi)
                 beta = r0.norm()
                 rel = (beta / rhs_norm).item()
                 residual_history.append(float(rel))
@@ -137,9 +178,8 @@ def batched_gmres(
 
                 m = 0
                 for j in range(restart):
-                    vj = V[j].view(1, n, 1)
-                    z = _apply_precond(vj).view(1, n, 1)
-                    w = mv(z).view(-1)
+                    z = _apply_precond_vec(V[j])
+                    w = _mv_vec(z)
                     for i in range(j + 1):
                         hij = torch.dot(V[i], w)
                         H[i, j] = hij
@@ -153,9 +193,9 @@ def batched_gmres(
                     gj = g[: m + 1]
                     y = torch.linalg.lstsq(Hj, gj).solution
                     Vm = torch.stack(V[:m], dim=1)
-                    z_corr = _apply_precond((Vm @ y).view(1, n, 1)).view(-1)
+                    z_corr = _apply_precond_vec(Vm @ y)
                     x_trial = xi + z_corr
-                    r_trial = rhs - mv(x_trial.view(1, n, 1)).view(-1)
+                    r_trial = rhs - _mv_vec(x_trial)
                     rel_trial = (r_trial.norm() / rhs_norm).item()
                     residual_history.append(float(rel_trial))
                     if rel_trial <= tol:
@@ -169,7 +209,7 @@ def batched_gmres(
                     gj = g[: m + 1]
                     y = torch.linalg.lstsq(Hj, gj).solution
                     Vm = torch.stack(V[:m], dim=1)
-                    z_corr = _apply_precond((Vm @ y).view(1, n, 1)).view(-1)
+                    z_corr = _apply_precond_vec(Vm @ y)
                     xi = xi + z_corr
                     iter_count += m
 
@@ -186,21 +226,19 @@ def batched_minres(
     b: torch.Tensor,
     *,
     x0: torch.Tensor | None = None,
-    preconditioner: PrecondFn | None = None,
+    preconditioner: PrecondArg = None,
     max_iters: int = 200,
     tol: float = 1e-6,
 ) -> tuple[torch.Tensor, KrylovInfo]:
-    """MINRES-style interface using GMRES backend for symmetric/indefinite robustness.
+    """MINRES-style interface.
 
-    A full batched Lanczos MINRES is substantial; this path preserves the API and
-    robust residual-minimization behavior while staying GPU-compatible.
+    For the current KKT normal-equation path (SPD), use CG backend.
     """
-    return batched_gmres(
+    return batched_cg(
         M_or_fn,
         b,
         x0=x0,
         preconditioner=preconditioner,
-        restart=min(20, max_iters),
         max_iters=max_iters,
         tol=tol,
     )
