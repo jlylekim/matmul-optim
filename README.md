@@ -70,10 +70,11 @@ bash scripts/reproduce_large.sh
 ```
 
 `benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
+By default, each reproduce invocation is capped at `10` experiments total (`--max-experiments`).
 To force single-process behavior:
 
 ```bash
-python benchmarks/reproduce.py --output results/manual_run_YYYYmmdd_HHMMSS --study all --no-auto-distributed
+python benchmarks/reproduce.py --output results/manual_run_YYYYmmdd_HHMMSS --study all --no-auto-distributed --max-experiments 10
 ```
 
 Benchmark logs include standardized pass/fail tiers at `1e-2`, `1e-3`, and `1e-4`

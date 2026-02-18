@@ -289,6 +289,8 @@ def _maybe_autolaunch_torchrun(args: argparse.Namespace) -> None:
         "--no-auto-distributed",
         "--max-gpus",
         str(args.max_gpus),
+        "--max-experiments",
+        str(args.max_experiments),
     ]
     if args.eval_tiers:
         cmd.append("--eval-tiers")
@@ -332,6 +334,12 @@ def main() -> None:
         default=[1e-2, 1e-3, 1e-4],
         help="Tolerance tiers used for standardized pass/fail reporting",
     )
+    parser.add_argument(
+        "--max-experiments",
+        type=int,
+        default=10,
+        help="Maximum number of experiments to execute in one reproduce run",
+    )
     args = parser.parse_args()
 
     _maybe_autolaunch_torchrun(args)
@@ -339,11 +347,20 @@ def main() -> None:
 
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        if world_size > 1:
+            torch.cuda.set_device(local_rank)
+            device = f"cuda:{local_rank}"
+        else:
+            device = "cuda"
+    else:
+        device = "cpu"
+    print(f"[rank-bind] rank={rank} local_rank={local_rank} world_size={world_size} device={device}", flush=True)
 
     ipm_ns_cfg = GEMMIPMConfig(
         kkt_mode="ns_only",
@@ -382,7 +399,7 @@ def main() -> None:
     else:
         studies = [args.study]
 
-    total_experiments = _planned_experiment_count(
+    raw_total_experiments = _planned_experiment_count(
         studies=studies,
         device=device,
         seed=args.seed,
@@ -390,15 +407,25 @@ def main() -> None:
         world_size=world_size,
         per_gpu_batch=args.per_gpu_batch,
         strong_total_batch=args.strong_total_batch,
-        include_cpu_baselines=(rank == 0),
+        include_cpu_baselines=True,
     )
+    total_experiments = max(0, min(raw_total_experiments, int(args.max_experiments)))
     if rank == 0:
         print(
             f"[plan] studies={studies}, preset={args.preset}, world_size={world_size}, "
-            f"planned_experiments={total_experiments}",
+            f"planned_experiments={total_experiments} (raw={raw_total_experiments}), rank0_device={device}",
             flush=True,
         )
     progress = 0
+    remaining_slots = total_experiments
+    stop_all = total_experiments <= 0
+
+    def _reserve_slot() -> bool:
+        nonlocal remaining_slots
+        if remaining_slots <= 0:
+            return False
+        remaining_slots -= 1
+        return True
 
     def _log_start(solver_name: str, problem_id: str) -> None:
         nonlocal progress
@@ -416,6 +443,9 @@ def main() -> None:
         print(f"      -> {solver_name}: status={status}, median_s={median_s:.4f}", flush=True)
 
     for study in studies:
+        if stop_all:
+            break
+
         if study == "main":
             configs = _make_main_configs(device, args.seed, args.preset)
         else:
@@ -431,10 +461,15 @@ def main() -> None:
             ]
 
         for idx, cfg in enumerate(configs):
+            if stop_all:
+                break
             problem = generate_dense_parametric_qp(cfg)
             problem_id = f"{study}_dense_parametric_{idx}"
             cfg_payload = _jsonable(asdict(cfg))
 
+            if not _reserve_slot():
+                stop_all = True
+                break
             _log_start("gemm_ipm_ns", problem_id)
             rec = run_qp_solver(
                 run_id=f"{study}_run_{idx}_gemm_ipm_ns",
@@ -460,6 +495,9 @@ def main() -> None:
                 records.append(rec)
                 _log_end("gemm_ipm_ns", rec.status, rec.timing.median_s)
 
+            if not _reserve_slot():
+                stop_all = True
+                break
             _log_start("gemm_ipm_robust", problem_id)
             rec = run_qp_solver(
                 run_id=f"{study}_run_{idx}_gemm_ipm_robust",
@@ -485,6 +523,9 @@ def main() -> None:
                 records.append(rec)
                 _log_end("gemm_ipm_robust", rec.status, rec.timing.median_s)
 
+            if not _reserve_slot():
+                stop_all = True
+                break
             _log_start("gemm_splitting_qp", problem_id)
             rec = run_qp_solver(
                 run_id=f"{study}_run_{idx}_gemm_split",
@@ -510,59 +551,75 @@ def main() -> None:
                 records.append(rec)
                 _log_end("gemm_splitting_qp", rec.status, rec.timing.median_s)
 
-            if rank == 0 and study == "main":
-                baseline_problem = problem.slice_batch(0, 1).to("cpu")
-                bcfg = BaselineRunConfig(
-                    tol_p=1e-4,
-                    tol_d=1e-4,
-                    max_iters=10000,
-                    warm_start=False,
-                    presolve=True,
-                )
-                _log_start("scipy_trust_constr_cpu", problem_id)
-                scipy_res = run_scipy_trust_constr_qp(baseline_problem, bcfg)
-                scipy_row = _baseline_to_record(
-                    run_id=f"{study}_run_{idx}_scipy_trust_constr_cpu",
-                    category="qp_conic",
-                    problem_id=problem_id,
-                    solver_name="scipy_trust_constr_cpu",
-                    baseline=scipy_res,
-                    eval_tiers=args.eval_tiers,
-                    tol_p=bcfg.tol_p,
-                    tol_d=bcfg.tol_d,
-                    tol_g=bcfg.tol_g,
-                )
-                if scipy_row is not None:
-                    records.append(scipy_row)
-                    _log_end("scipy_trust_constr_cpu", scipy_row["status"], float(scipy_row["timing"]["median_s"]))
-                else:
-                    _log_end("scipy_trust_constr_cpu", "unavailable", None)
+            if study == "main":
+                if not _reserve_slot():
+                    stop_all = True
+                    break
+                if rank == 0:
+                    baseline_problem = problem.slice_batch(0, 1).to("cpu")
+                    bcfg = BaselineRunConfig(
+                        tol_p=1e-4,
+                        tol_d=1e-4,
+                        max_iters=10000,
+                        warm_start=False,
+                        presolve=True,
+                    )
+                    _log_start("scipy_trust_constr_cpu", problem_id)
+                    scipy_res = run_scipy_trust_constr_qp(baseline_problem, bcfg)
+                    scipy_row = _baseline_to_record(
+                        run_id=f"{study}_run_{idx}_scipy_trust_constr_cpu",
+                        category="qp_conic",
+                        problem_id=problem_id,
+                        solver_name="scipy_trust_constr_cpu",
+                        baseline=scipy_res,
+                        eval_tiers=args.eval_tiers,
+                        tol_p=bcfg.tol_p,
+                        tol_d=bcfg.tol_d,
+                        tol_g=bcfg.tol_g,
+                    )
+                    if scipy_row is not None:
+                        records.append(scipy_row)
+                        _log_end("scipy_trust_constr_cpu", scipy_row["status"], float(scipy_row["timing"]["median_s"]))
+                    else:
+                        _log_end("scipy_trust_constr_cpu", "unavailable", None)
 
-                _log_start("osqp_cpu", problem_id)
-                osqp_res = run_osqp_qp(baseline_problem, bcfg)
-                osqp_row = _baseline_to_record(
-                    run_id=f"{study}_run_{idx}_osqp_cpu",
-                    category="qp_conic",
-                    problem_id=problem_id,
-                    solver_name="osqp_cpu",
-                    baseline=osqp_res,
-                    eval_tiers=args.eval_tiers,
-                    tol_p=bcfg.tol_p,
-                    tol_d=bcfg.tol_d,
-                    tol_g=bcfg.tol_g,
-                )
-                if osqp_row is not None:
-                    records.append(osqp_row)
-                    _log_end("osqp_cpu", osqp_row["status"], float(osqp_row["timing"]["median_s"]))
-                else:
-                    _log_end("osqp_cpu", "unavailable", None)
+                if not _reserve_slot():
+                    stop_all = True
+                    break
+                if rank == 0:
+                    _log_start("osqp_cpu", problem_id)
+                    osqp_res = run_osqp_qp(baseline_problem, bcfg)
+                    osqp_row = _baseline_to_record(
+                        run_id=f"{study}_run_{idx}_osqp_cpu",
+                        category="qp_conic",
+                        problem_id=problem_id,
+                        solver_name="osqp_cpu",
+                        baseline=osqp_res,
+                        eval_tiers=args.eval_tiers,
+                        tol_p=bcfg.tol_p,
+                        tol_d=bcfg.tol_d,
+                        tol_g=bcfg.tol_g,
+                    )
+                    if osqp_row is not None:
+                        records.append(osqp_row)
+                        _log_end("osqp_cpu", osqp_row["status"], float(osqp_row["timing"]["median_s"]))
+                    else:
+                        _log_end("osqp_cpu", "unavailable", None)
+
+        if stop_all:
+            break
 
         if study == "main":
             for idx, cfg in enumerate(_make_portfolio_configs(device, args.seed, args.preset)):
+                if stop_all:
+                    break
                 problem = generate_portfolio_qp(cfg)
                 problem_id = f"{study}_portfolio_{idx}"
                 cfg_payload = _jsonable(asdict(cfg))
 
+                if not _reserve_slot():
+                    stop_all = True
+                    break
                 _log_start("gemm_ipm_robust", problem_id)
                 rec = run_qp_solver(
                     run_id=f"{study}_portfolio_{idx}_gemm_ipm_robust",
@@ -589,10 +646,15 @@ def main() -> None:
                     _log_end("gemm_ipm_robust", rec.status, rec.timing.median_s)
 
             for idx, cfg in enumerate(_make_lp_configs(device, args.seed, args.preset)):
+                if stop_all:
+                    break
                 lp = generate_batched_lp(cfg)
                 problem_id = f"{study}_lp_{idx}"
                 cfg_payload = _jsonable(asdict(cfg))
 
+                if not _reserve_slot():
+                    stop_all = True
+                    break
                 _log_start("lp_first_order_gpu", problem_id)
                 rec = run_lp_solver(
                     run_id=f"{study}_lp_{idx}_pdhg",
@@ -617,6 +679,9 @@ def main() -> None:
                     records.append(rec)
                     _log_end("lp_first_order_gpu", rec.status, rec.timing.median_s)
 
+                if not _reserve_slot():
+                    stop_all = True
+                    break
                 if rank == 0:
                     lp_cpu = lp.slice_batch(0, 1).to("cpu")
                     _log_start("highs_cpu", problem_id)

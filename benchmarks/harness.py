@@ -254,6 +254,13 @@ def run_qp_solver(
     dist = init_distributed(backend=dist_backend)
     shard = shard_qp(problem, dist)
 
+    if torch.cuda.is_available():
+        if dist.is_distributed:
+            target_device = torch.device(f"cuda:{dist.local_rank}")
+            shard = shard.to(target_device)
+        elif shard.q.device.type != "cuda":
+            shard = shard.to("cuda")
+
     device = shard.q.device
     local_batch = shard.batch_size
 
@@ -348,6 +355,13 @@ def run_lp_solver(
 ) -> BenchmarkRecord | None:
     dist = init_distributed(backend=dist_backend)
     shard = shard_lp(problem, dist)
+
+    if torch.cuda.is_available():
+        if dist.is_distributed:
+            target_device = torch.device(f"cuda:{dist.local_rank}")
+            shard = shard.to(target_device)
+        elif shard.b.device.type != "cuda":
+            shard = shard.to("cuda")
 
     device = shard.b.device
     local_batch = shard.batch_size
