@@ -63,6 +63,13 @@ Run reproducible benchmark suite:
 bash scripts/reproduce.sh
 ```
 
+`benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
+To force single-process behavior:
+
+```bash
+python benchmarks/reproduce.py --output artifacts/main --study all --no-auto-distributed
+```
+
 Run strong/weak multi-GPU scaling (1,2,4,8 ranks):
 
 ```bash

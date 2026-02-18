@@ -7,8 +7,27 @@ export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
 OUT_BASE="${1:-${ROOT_DIR}/artifacts/scaling}"
+AVAILABLE_GPUS="$(python - <<'PY'
+import torch
+print(torch.cuda.device_count() if torch.cuda.is_available() else 1)
+PY
+)"
 
-for NPROC in 1 2 4 8; do
+NPROCS=(1 2 4 8)
+FILTERED=()
+for N in "${NPROCS[@]}"; do
+  if [[ "${N}" -le "${AVAILABLE_GPUS}" ]]; then
+    FILTERED+=("${N}")
+  fi
+done
+if [[ "${AVAILABLE_GPUS}" -gt 1 ]]; then
+  LAST="${FILTERED[${#FILTERED[@]}-1]:-1}"
+  if [[ "${LAST}" -ne "${AVAILABLE_GPUS}" ]]; then
+    FILTERED+=("${AVAILABLE_GPUS}")
+  fi
+fi
+
+for NPROC in "${FILTERED[@]}"; do
   OUT_DIR="${OUT_BASE}/gpus_${NPROC}"
   mkdir -p "${OUT_DIR}"
 

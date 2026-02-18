@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -74,6 +76,60 @@ def _make_scaling_config(device: str, seed: int, world_size: int, study: str, pe
     )
 
 
+def _maybe_autolaunch_torchrun(args: argparse.Namespace) -> None:
+    """Auto-launch distributed run across all visible GPUs when not already under torchrun."""
+    if args.no_auto_distributed:
+        return
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1:
+        return
+
+    if not torch.cuda.is_available():
+        return
+
+    visible_gpus = torch.cuda.device_count()
+    if visible_gpus <= 1:
+        return
+
+    if shutil.which("torchrun") is None:
+        print("[warn] Multiple GPUs detected but `torchrun` was not found. Running single process.")
+        return
+
+    nproc = visible_gpus if args.max_gpus <= 0 else min(max(1, args.max_gpus), visible_gpus)
+    if nproc <= 1:
+        return
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    script = str(Path(__file__).resolve())
+    cmd = [
+        "torchrun",
+        "--standalone",
+        f"--nproc_per_node={nproc}",
+        script,
+        "--output",
+        str(Path(args.output).resolve()),
+        "--seed",
+        str(args.seed),
+        "--study",
+        str(args.study),
+        "--warmups",
+        str(args.warmups),
+        "--repeats",
+        str(args.repeats),
+        "--per-gpu-batch",
+        str(args.per_gpu_batch),
+        "--strong-total-batch",
+        str(args.strong_total_batch),
+        "--no-auto-distributed",
+        "--max-gpus",
+        str(args.max_gpus),
+    ]
+    print(f"[auto-distributed] launching on {nproc} GPUs: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+    raise SystemExit(0)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reproduce GEMM-KKT experiments")
     parser.add_argument("--output", type=str, required=True, help="Artifact output directory")
@@ -83,8 +139,20 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--per-gpu-batch", type=int, default=64)
     parser.add_argument("--strong-total-batch", type=int, default=512)
+    parser.add_argument(
+        "--max-gpus",
+        type=int,
+        default=0,
+        help="Maximum number of GPUs to use in auto-distributed mode (0 means all visible GPUs)",
+    )
+    parser.add_argument(
+        "--no-auto-distributed",
+        action="store_true",
+        help="Disable automatic torchrun relaunch when multiple GPUs are visible",
+    )
     args = parser.parse_args()
 
+    _maybe_autolaunch_torchrun(args)
     set_deterministic_seed(args.seed)
 
     rank = int(os.environ.get("RANK", "0"))
