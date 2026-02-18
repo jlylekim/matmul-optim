@@ -5,6 +5,8 @@ import math
 import os
 import shutil
 import subprocess
+import time
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,7 @@ from gemm_kkt.baselines.cpu_refs import run_highs_lp, run_osqp_qp, run_scipy_tru
 from gemm_kkt.solvers.gemm_ipm_qp import GEMMIPMConfig, GemmIPMQPSolver
 from gemm_kkt.solvers.gemm_splitting_qp import GEMMSplittingQPConfig, GemmSplittingQPSolver
 from gemm_kkt.solvers.lp_first_order_gpu import LPFirstOrderConfig, LPFirstOrderSolver
+from gemm_kkt.solvers.types import DenseBatchQP
 from gemm_kkt.utils.random import set_deterministic_seed
 
 
@@ -239,6 +242,167 @@ def _planned_experiment_count(
     return total
 
 
+def _clone_cfg(cfg: GEMMIPMConfig, **kwargs: Any) -> GEMMIPMConfig:
+    out = deepcopy(cfg)
+    for k, v in kwargs.items():
+        if k.startswith("ns_"):
+            setattr(out.ns_config, k[3:], v)
+        else:
+            setattr(out, k, v)
+    return out
+
+
+def _ipm_objective(metrics: dict[str, Any], status: str, elapsed_s: float) -> float:
+    p = _as_float_or_inf(metrics.get("primal_residual", float("inf")))
+    d = _as_float_or_inf(metrics.get("dual_residual", float("inf")))
+    g = _as_float_or_inf(metrics.get("duality_gap", float("inf")))
+
+    score = p + d + (g if math.isfinite(g) else max(p, d))
+    if status != "solved":
+        score += 10.0
+    score += 1e-3 * float(elapsed_s)
+    return score
+
+
+def _candidate_ipm_configs(base: GEMMIPMConfig, mode: str) -> list[GEMMIPMConfig]:
+    # Small, explicit grid focused on stabilization knobs that were most sensitive in practice.
+    if mode == "ns_only":
+        return [
+            _clone_cfg(base, kkt_mode="ns_only"),
+            _clone_cfg(
+                base,
+                kkt_mode="ns_only",
+                regularization=1e-4,
+                mu_sigma=0.2,
+                line_search_backoff=0.95,
+                refinement_iters=max(base.refinement_iters, 8),
+                ns_max_iters=40,
+                ns_damping=0.9,
+            ),
+            _clone_cfg(
+                base,
+                kkt_mode="ns_only",
+                regularization=1e-3,
+                mu_sigma=0.3,
+                line_search_backoff=0.9,
+                refinement_iters=max(base.refinement_iters, 10),
+                ns_max_iters=50,
+                ns_damping=0.8,
+            ),
+            _clone_cfg(
+                base,
+                kkt_mode="ns_only",
+                regularization=1e-5,
+                mu_sigma=0.05,
+                line_search_backoff=0.97,
+                refinement_iters=max(base.refinement_iters, 8),
+                ns_max_iters=40,
+                ns_damping=1.0,
+            ),
+        ]
+
+    return [
+        _clone_cfg(base, kkt_mode="robust"),
+        _clone_cfg(
+            base,
+            kkt_mode="robust",
+            regularization=1e-4,
+            mu_sigma=0.2,
+            line_search_backoff=0.95,
+            krylov_tol=1e-7,
+            krylov_max_iters=max(base.krylov_max_iters, 200),
+            robust_switch_residual=2e-1,
+            ns_max_iters=40,
+            ns_damping=0.9,
+        ),
+        _clone_cfg(
+            base,
+            kkt_mode="robust",
+            regularization=1e-3,
+            mu_sigma=0.3,
+            line_search_backoff=0.9,
+            krylov_tol=1e-6,
+            krylov_max_iters=max(base.krylov_max_iters, 280),
+            robust_switch_residual=1e-2,
+            ns_max_iters=50,
+            ns_damping=0.8,
+        ),
+        _clone_cfg(
+            base,
+            kkt_mode="robust",
+            regularization=1e-4,
+            mu_sigma=0.05,
+            line_search_backoff=0.97,
+            krylov_tol=1e-7,
+            krylov_solver="gmres",
+            krylov_max_iters=max(base.krylov_max_iters, 220),
+            robust_switch_residual=5e-2,
+            ns_max_iters=40,
+            ns_damping=1.0,
+        ),
+    ]
+
+
+def _tune_ipm_config(
+    *,
+    base_cfg: GEMMIPMConfig,
+    mode: str,
+    problem: DenseBatchQP,
+    tune_batch: int,
+    tune_iters: int,
+    rank: int,
+    study: str,
+) -> GEMMIPMConfig:
+    candidates = _candidate_ipm_configs(base_cfg, mode=mode)
+    tune_problem = problem
+    if problem.batch_size > tune_batch:
+        tune_problem = problem.slice_batch(0, tune_batch)
+
+    best_cfg = candidates[0]
+    best_score = float("inf")
+    best_status = "failed"
+    best_metrics: dict[str, Any] = {}
+
+    for idx, cand in enumerate(candidates):
+        eval_cfg = deepcopy(cand)
+        eval_cfg.max_iters = min(eval_cfg.max_iters, tune_iters)
+        solver = GemmIPMQPSolver(eval_cfg)
+
+        t0 = time.perf_counter()
+        result = solver.solve(tune_problem)
+        elapsed = time.perf_counter() - t0
+        score = _ipm_objective(result.metrics, result.status, elapsed_s=elapsed)
+        if score < best_score:
+            best_score = score
+            best_cfg = cand
+            best_status = result.status
+            best_metrics = result.metrics
+
+        if rank == 0:
+            print(
+                "[ns-grid]"
+                f" study={study} mode={mode} cand={idx}"
+                f" score={score:.6g} status={result.status}"
+                f" p={_as_float_or_inf(result.metrics.get('primal_residual')):.3e}"
+                f" d={_as_float_or_inf(result.metrics.get('dual_residual')):.3e}"
+                f" g={_as_float_or_inf(result.metrics.get('duality_gap')):.3e}"
+                f" t={elapsed:.3f}s",
+                flush=True,
+            )
+
+    if rank == 0:
+        print(
+            "[ns-grid] selected"
+            f" study={study} mode={mode}"
+            f" score={best_score:.6g} status={best_status}"
+            f" p={_as_float_or_inf(best_metrics.get('primal_residual')):.3e}"
+            f" d={_as_float_or_inf(best_metrics.get('dual_residual')):.3e}"
+            f" g={_as_float_or_inf(best_metrics.get('duality_gap')):.3e}",
+            flush=True,
+        )
+    return best_cfg
+
+
 def _maybe_autolaunch_torchrun(args: argparse.Namespace) -> None:
     """Auto-launch distributed run across all visible GPUs when not already under torchrun."""
     if args.no_auto_distributed:
@@ -291,7 +455,13 @@ def _maybe_autolaunch_torchrun(args: argparse.Namespace) -> None:
         str(args.max_gpus),
         "--max-experiments",
         str(args.max_experiments),
+        "--ns-grid-tune-batch",
+        str(args.ns_grid_tune_batch),
+        "--ns-grid-tune-iters",
+        str(args.ns_grid_tune_iters),
     ]
+    if args.disable_ns_grid_search:
+        cmd.append("--disable-ns-grid-search")
     if args.eval_tiers:
         cmd.append("--eval-tiers")
         cmd.extend(str(t) for t in args.eval_tiers)
@@ -340,6 +510,23 @@ def main() -> None:
         default=10,
         help="Maximum number of experiments to execute in one reproduce run",
     )
+    parser.add_argument(
+        "--disable-ns-grid-search",
+        action="store_true",
+        help="Disable NS-IPM hyperparameter search and use static defaults",
+    )
+    parser.add_argument(
+        "--ns-grid-tune-batch",
+        type=int,
+        default=8,
+        help="Batch size used during NS-IPM tuning",
+    )
+    parser.add_argument(
+        "--ns-grid-tune-iters",
+        type=int,
+        default=40,
+        help="Max IPM iterations used during NS-IPM tuning",
+    )
     args = parser.parse_args()
 
     _maybe_autolaunch_torchrun(args)
@@ -361,18 +548,19 @@ def main() -> None:
     else:
         device = "cpu"
     print(f"[rank-bind] rank={rank} local_rank={local_rank} world_size={world_size} device={device}", flush=True)
+    use_cuda = str(device).startswith("cuda")
 
-    ipm_ns_cfg = GEMMIPMConfig(
+    base_ipm_ns_cfg = GEMMIPMConfig(
         kkt_mode="ns_only",
-        precision="bf16" if device == "cuda" else "fp32",
+        precision="bf16" if use_cuda else "fp32",
         tol_p=1e-4,
         tol_d=1e-4,
         tol_g=1e-4,
         max_iters=120 if args.preset == "large" else 80,
     )
-    ipm_rb_cfg = GEMMIPMConfig(
+    base_ipm_rb_cfg = GEMMIPMConfig(
         kkt_mode="robust",
-        precision="bf16" if device == "cuda" else "fp32",
+        precision="bf16" if use_cuda else "fp32",
         tol_p=1e-6,
         tol_d=1e-6,
         tol_g=1e-6,
@@ -385,8 +573,6 @@ def main() -> None:
         max_iters=50_000 if args.preset == "large" else 20_000,
     )
 
-    ipm_ns = GemmIPMQPSolver(ipm_ns_cfg)
-    ipm_robust = GemmIPMQPSolver(ipm_rb_cfg)
     split = GemmSplittingQPSolver(split_cfg)
     lp_cfg = LPFirstOrderConfig(max_iters=120_000 if args.preset == "large" else 80_000, tol_p=1e-4, tol_d=1e-4)
     lp_solver = LPFirstOrderSolver(lp_cfg)
@@ -460,6 +646,34 @@ def main() -> None:
                 )
             ]
 
+        study_ipm_ns_cfg = deepcopy(base_ipm_ns_cfg)
+        study_ipm_rb_cfg = deepcopy(base_ipm_rb_cfg)
+        if configs and not args.disable_ns_grid_search:
+            tune_problem = generate_dense_parametric_qp(configs[0])
+            study_ipm_ns_cfg = _tune_ipm_config(
+                base_cfg=study_ipm_ns_cfg,
+                mode="ns_only",
+                problem=tune_problem,
+                tune_batch=max(1, args.ns_grid_tune_batch),
+                tune_iters=max(5, args.ns_grid_tune_iters),
+                rank=rank,
+                study=study,
+            )
+            study_ipm_rb_cfg = _tune_ipm_config(
+                base_cfg=study_ipm_rb_cfg,
+                mode="robust",
+                problem=tune_problem,
+                tune_batch=max(1, args.ns_grid_tune_batch),
+                tune_iters=max(5, args.ns_grid_tune_iters),
+                rank=rank,
+                study=study,
+            )
+
+        ipm_ns = GemmIPMQPSolver(study_ipm_ns_cfg)
+        ipm_robust = GemmIPMQPSolver(study_ipm_rb_cfg)
+        ns_solver_cfg_payload = _jsonable(asdict(study_ipm_ns_cfg))
+        rb_solver_cfg_payload = _jsonable(asdict(study_ipm_rb_cfg))
+
         for idx, cfg in enumerate(configs):
             if stop_all:
                 break
@@ -479,15 +693,16 @@ def main() -> None:
                 problem=problem,
                 warmups=args.warmups,
                 repeats=args.repeats,
-                tol_p=ipm_ns_cfg.tol_p,
-                tol_d=ipm_ns_cfg.tol_d,
-                tol_g=ipm_ns_cfg.tol_g,
+                tol_p=study_ipm_ns_cfg.tol_p,
+                tol_d=study_ipm_ns_cfg.tol_d,
+                tol_g=study_ipm_ns_cfg.tol_g,
                 tiers=args.eval_tiers,
                 extra_metadata={
                     "experiment": "parametric_qp",
                     "study": study,
                     "preset": args.preset,
                     "config": cfg_payload,
+                    "solver_config": ns_solver_cfg_payload,
                     "eval_tiers": args.eval_tiers,
                 },
             )
@@ -507,15 +722,16 @@ def main() -> None:
                 problem=problem,
                 warmups=args.warmups,
                 repeats=args.repeats,
-                tol_p=ipm_rb_cfg.tol_p,
-                tol_d=ipm_rb_cfg.tol_d,
-                tol_g=ipm_rb_cfg.tol_g,
+                tol_p=study_ipm_rb_cfg.tol_p,
+                tol_d=study_ipm_rb_cfg.tol_d,
+                tol_g=study_ipm_rb_cfg.tol_g,
                 tiers=args.eval_tiers,
                 extra_metadata={
                     "experiment": "parametric_qp",
                     "study": study,
                     "preset": args.preset,
                     "config": cfg_payload,
+                    "solver_config": rb_solver_cfg_payload,
                     "eval_tiers": args.eval_tiers,
                 },
             )
@@ -629,15 +845,16 @@ def main() -> None:
                     problem=problem,
                     warmups=args.warmups,
                     repeats=args.repeats,
-                    tol_p=ipm_rb_cfg.tol_p,
-                    tol_d=ipm_rb_cfg.tol_d,
-                    tol_g=ipm_rb_cfg.tol_g,
+                    tol_p=study_ipm_rb_cfg.tol_p,
+                    tol_d=study_ipm_rb_cfg.tol_d,
+                    tol_g=study_ipm_rb_cfg.tol_g,
                     tiers=args.eval_tiers,
                     extra_metadata={
                         "experiment": "portfolio_qp",
                         "study": study,
                         "preset": args.preset,
                         "config": cfg_payload,
+                        "solver_config": rb_solver_cfg_payload,
                         "eval_tiers": args.eval_tiers,
                     },
                 )

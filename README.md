@@ -71,6 +71,7 @@ bash scripts/reproduce_large.sh
 
 `benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
 By default, each reproduce invocation is capped at `10` experiments total (`--max-experiments`).
+NS-IPM hyperparameter grid search is enabled by default and can be disabled with `--disable-ns-grid-search`.
 To force single-process behavior:
 
 ```bash
@@ -89,8 +90,8 @@ bash scripts/run_scaling.sh
 Results are written to timestamped directories under `results/` (for example `results/main_20260218_043500`):
 
 - JSONL run logs
-- markdown + LaTeX tables (`summary_table.*`, `accuracy_iterations_table.*`)
-- PDF plots (including `accuracy_iterations_errorbars.pdf`)
+- markdown + LaTeX summary table (`summary_table.*`) with accuracy/time only
+- PDF plots (`accuracy_vs_time.pdf`) with accuracy/time only
 
 ## Repository layout
 
@@ -99,7 +100,7 @@ Results are written to timestamped directories under `results/` (for example `re
 - `src/gemm_kkt/baselines`: wrappers for external SOTA solvers and CPU references
 - `benchmarks/generators`: dense parametric QP, portfolio QP, optional mixed-binary MIQP relaxations
 - `benchmarks/harness.py`: unified runner and timing discipline
-- `benchmarks/plots.py`: performance profiles and scaling plots
+- `benchmarks/plots.py`: accuracy/time summary + plot generation
 - `tests`: kernel and solver smoke tests
 
 ## Reproducibility
