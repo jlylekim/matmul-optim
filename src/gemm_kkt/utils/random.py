@@ -10,6 +10,8 @@ import torch
 def set_deterministic_seed(seed: int) -> None:
     """Set deterministic seeds for Python, NumPy, and Torch."""
     os.environ["PYTHONHASHSEED"] = str(seed)
+    # Required for deterministic CuBLAS GEMM behavior on CUDA >= 10.2.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

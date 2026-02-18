@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Literal
@@ -34,6 +35,8 @@ class GEMMIPMConfig:
     refinement_tol: float = 1e-6
     ns_config: NSInverseConfig = field(default_factory=NSInverseConfig)
     precision: Literal["fp32", "fp16", "bf16"] = "bf16"
+    denom_floor: float = 1e-6
+    direction_clip: float = 1e6
 
 
 class GemmIPMQPSolver:
@@ -80,8 +83,10 @@ class GemmIPMQPSolver:
         cfg = self.config
         timing: dict[str, float] = {"ns_s": 0.0, "refine_s": 0.0, "krylov_s": 0.0}
 
-        Mc = M.to(compute_dtype)
-        rhsc = rhs.to(compute_dtype)
+        # Keep NS inverse construction in fp32 for stability; mixed precision is still
+        # used by surrounding GEMM-heavy ops and can be reintroduced with tighter guards.
+        Mc = M.float()
+        rhsc = rhs.float()
 
         method = "krylov"
         inv = None
@@ -95,7 +100,8 @@ class GemmIPMQPSolver:
             timing["ns_s"] += time.perf_counter() - t0
 
             dx = apply_inverse(inv, rhsc).float()
-            if cfg.refinement_iters > 0:
+            ns_valid = torch.isfinite(dx).all().item() and torch.isfinite(inv).all().item()
+            if cfg.refinement_iters > 0 and ns_valid:
                 t0 = time.perf_counter()
                 dx, _ = iterative_refinement(
                     M,
@@ -108,9 +114,13 @@ class GemmIPMQPSolver:
                 sync_if_cuda(M.device)
                 timing["refine_s"] += time.perf_counter() - t0
 
-            r = rhs - batch_matmul(M, dx.unsqueeze(-1)).squeeze(-1)
-            solve_res = float((r.norm(dim=1) / rhs.norm(dim=1).clamp_min(1e-12)).mean().item())
-            method = "ns"
+            if ns_valid and torch.isfinite(dx).all().item():
+                r = rhs - batch_matmul(M, dx.unsqueeze(-1)).squeeze(-1)
+                solve_res = float((r.norm(dim=1) / rhs.norm(dim=1).clamp_min(1e-12)).mean().item())
+                method = "ns"
+            else:
+                solve_res = float("inf")
+                method = "ns_invalid"
 
             if cfg.kkt_mode == "ns_only" and not ns_info.converged:
                 method = "ns_unconverged"
@@ -147,8 +157,13 @@ class GemmIPMQPSolver:
             timing["krylov_s"] += time.perf_counter() - t0
             method = "krylov"
 
-            r = rhs - batch_matmul(M, dx.unsqueeze(-1)).squeeze(-1)
-            solve_res = float((r.norm(dim=1) / rhs.norm(dim=1).clamp_min(1e-12)).mean().item())
+            if torch.isfinite(dx).all().item():
+                r = rhs - batch_matmul(M, dx.unsqueeze(-1)).squeeze(-1)
+                solve_res = float((r.norm(dim=1) / rhs.norm(dim=1).clamp_min(1e-12)).mean().item())
+            else:
+                dx = torch.zeros_like(rhs)
+                solve_res = float("inf")
+                method = "krylov_invalid"
 
         return dx.float(), solve_res, method, timing
 
@@ -193,8 +208,9 @@ class GemmIPMQPSolver:
             g_l = Ax - l
             g_u = u - Ax
 
-            g_l_pos = g_l.clamp_min(self.config.positivity_eps)
-            g_u_pos = g_u.clamp_min(self.config.positivity_eps)
+            denom_floor = max(self.config.positivity_eps, self.config.denom_floor)
+            g_l_pos = g_l.clamp_min(denom_floor)
+            g_u_pos = g_u.clamp_min(denom_floor)
 
             r_dual = self._matvec_P(P, x) + q + self._matvec_At(A, lam_u - lam_l)
             mu = self.config.mu_sigma * (g_l_pos * lam_l + g_u_pos * lam_u).mean(dim=1, keepdim=True)
@@ -204,6 +220,8 @@ class GemmIPMQPSolver:
             t0 = time.perf_counter()
             w = lam_u / g_u_pos + lam_l / g_l_pos
             c = -r_cent_u / g_u_pos + r_cent_l / g_l_pos
+            w = torch.nan_to_num(w, nan=0.0, posinf=self.config.direction_clip, neginf=-self.config.direction_clip)
+            c = torch.nan_to_num(c, nan=0.0, posinf=self.config.direction_clip, neginf=-self.config.direction_clip)
 
             Atc = self._matvec_At(A, c)
             rhs = -r_dual - Atc
@@ -226,6 +244,10 @@ class GemmIPMQPSolver:
             dlam_l = (-r_cent_l - lam_l * dAx) / g_l_pos
             dlam_u = (-r_cent_u + lam_u * dAx) / g_u_pos
 
+            dAx = torch.nan_to_num(dAx, nan=0.0, posinf=self.config.direction_clip, neginf=-self.config.direction_clip)
+            dlam_l = torch.nan_to_num(dlam_l, nan=0.0, posinf=self.config.direction_clip, neginf=-self.config.direction_clip)
+            dlam_u = torch.nan_to_num(dlam_u, nan=0.0, posinf=self.config.direction_clip, neginf=-self.config.direction_clip)
+
             t0 = time.perf_counter()
             alpha_pri = min(
                 self._max_step_positive(g_l_pos, dAx),
@@ -236,10 +258,15 @@ class GemmIPMQPSolver:
                 self._max_step_positive(lam_u, dlam_u),
             )
             alpha = min(alpha_pri, alpha_dual)
+            if (not math.isfinite(alpha)) or alpha <= 0.0:
+                alpha = 1e-3
 
             x = x + alpha * dx
             lam_l = (lam_l + alpha * dlam_l).clamp_min(self.config.positivity_eps)
             lam_u = (lam_u + alpha * dlam_u).clamp_min(self.config.positivity_eps)
+            x = torch.nan_to_num(x, nan=0.0, posinf=self.config.direction_clip, neginf=-self.config.direction_clip)
+            lam_l = torch.nan_to_num(lam_l, nan=1.0, posinf=self.config.direction_clip, neginf=self.config.positivity_eps)
+            lam_u = torch.nan_to_num(lam_u, nan=1.0, posinf=self.config.direction_clip, neginf=self.config.positivity_eps)
 
             sync_if_cuda(device)
             timing_total["line_search_s"] += time.perf_counter() - t0

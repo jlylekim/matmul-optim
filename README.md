@@ -88,6 +88,7 @@ Artifacts are written to `artifacts/`:
 ## Reproducibility
 
 - Deterministic seeds enabled by default (`torch.use_deterministic_algorithms` where possible)
+- For CUDA deterministic GEMM, set `CUBLAS_WORKSPACE_CONFIG=:4096:8` (the provided scripts set this automatically)
 - All runs log device, CUDA, driver-reported metadata, tolerances, and stopping metrics
 - No hidden tuning: benchmark configs are explicit in `benchmarks/reproduce.py`
 
