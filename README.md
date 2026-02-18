@@ -63,12 +63,21 @@ Run reproducible benchmark suite:
 bash scripts/reproduce.sh
 ```
 
+Run larger GPU-throughput-oriented suite:
+
+```bash
+bash scripts/reproduce_large.sh
+```
+
 `benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
 To force single-process behavior:
 
 ```bash
-python benchmarks/reproduce.py --output artifacts/main --study all --no-auto-distributed
+python benchmarks/reproduce.py --output results/manual_run_YYYYmmdd_HHMMSS --study all --no-auto-distributed
 ```
+
+Benchmark logs include standardized pass/fail tiers at `1e-2`, `1e-3`, and `1e-4`
+(`metadata.tier_pass.*`) in addition to solver-native stopping status.
 
 Run strong/weak multi-GPU scaling (1,2,4,8 ranks):
 
@@ -76,11 +85,11 @@ Run strong/weak multi-GPU scaling (1,2,4,8 ranks):
 bash scripts/run_scaling.sh
 ```
 
-Artifacts are written to `artifacts/`:
+Results are written to timestamped directories under `results/` (for example `results/main_20260218_043500`):
 
 - JSONL run logs
-- markdown + LaTeX tables
-- PDF plots
+- markdown + LaTeX tables (`summary_table.*`, `accuracy_iterations_table.*`)
+- PDF plots (including `accuracy_iterations_errorbars.pdf`)
 
 ## Repository layout
 
@@ -105,4 +114,4 @@ GPU baseline wrappers are included with a uniform result interface for:
 
 - `cuClarabel`, `cuOSQP`, `MPAX`, `cuPDLP-C`, `MadIPM`
 
-Some wrappers are environment stubs by default (`status=not_implemented`) because installation paths differ by cluster image; CPU references (`OSQP`, `HiGHS`) are runnable when dependencies are installed.
+Some wrappers are environment stubs by default (`status=not_implemented`) because installation paths differ by cluster image; CPU references include `SciPy trust-constr` (always available with this repo deps) plus optional `OSQP` and `HiGHS` when installed.

@@ -29,6 +29,12 @@ def _shifted_geo_mean(values: np.ndarray, shift: float = 1e-3) -> float:
     return float(np.exp(np.mean(np.log(values + shift))) - shift)
 
 
+def _numeric_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(df[col], errors="coerce")
+
+
 def plot_performance_profile(df: pd.DataFrame, out_dir: Path) -> None:
     if df.empty:
         return
@@ -170,20 +176,46 @@ def write_summary_tables(df: pd.DataFrame, out_dir: Path) -> None:
         return
 
     rows = []
+    tier_cols = ["metadata.tier_pass.1e-2", "metadata.tier_pass.1e-3", "metadata.tier_pass.1e-4"]
     for solver, g in df.groupby("solver"):
-        times = g["median_s"].astype(float).to_numpy()
+        times = _numeric_series(g, "median_s").dropna()
+        primal = _numeric_series(g, "metrics.primal_residual").dropna()
+        dual = _numeric_series(g, "metrics.dual_residual").dropna()
+        gap = _numeric_series(g, "metrics.duality_gap").dropna()
+        iters = _numeric_series(g, "metadata.solver_iterations_mean").dropna()
+        world = _numeric_series(g, "metadata.world_size").dropna()
+        stopping_pass = _numeric_series(g, "metadata.stopping_pass").fillna(0).astype(bool)
+        solved = g["status"] == "solved" if "status" in g.columns else pd.Series(dtype=bool)
+        max_iters = g["status"] == "max_iters" if "status" in g.columns else pd.Series(dtype=bool)
+
+        tier_counts: dict[str, int] = {}
+        for c in tier_cols:
+            key = c.split(".")[-1]
+            if c in g.columns:
+                tier_counts[f"pass_{key}"] = int(pd.to_numeric(g[c], errors="coerce").fillna(0).astype(bool).sum())
+            else:
+                tier_counts[f"pass_{key}"] = 0
         rows.append(
             {
                 "solver": solver,
                 "count": int(len(g)),
-                "median_time_s": float(np.median(times)),
-                "shifted_geo_mean_time_s": _shifted_geo_mean(times),
-                "mean_primal_residual": float(g["metrics.primal_residual"].astype(float).mean())
-                if "metrics.primal_residual" in g.columns
-                else np.nan,
-                "mean_dual_residual": float(g["metrics.dual_residual"].astype(float).mean())
-                if "metrics.dual_residual" in g.columns
-                else np.nan,
+                "solved_status_count": int(solved.sum()) if not solved.empty else 0,
+                "max_iters_status_count": int(max_iters.sum()) if not max_iters.empty else 0,
+                "stopping_pass_count": int(stopping_pass.sum()) if not stopping_pass.empty else 0,
+                "median_time_s": float(np.median(times)) if len(times) > 0 else np.nan,
+                "mean_time_s": float(times.mean()) if len(times) > 0 else np.nan,
+                "std_time_s": float(times.std(ddof=0)) if len(times) > 1 else 0.0,
+                "shifted_geo_mean_time_s": _shifted_geo_mean(times.to_numpy()) if len(times) > 0 else np.nan,
+                "mean_iterations": float(iters.mean()) if len(iters) > 0 else np.nan,
+                "std_iterations": float(iters.std(ddof=0)) if len(iters) > 1 else 0.0,
+                "mean_world_size": float(world.mean()) if len(world) > 0 else np.nan,
+                "mean_primal_residual": float(primal.mean()) if len(primal) > 0 else np.nan,
+                "std_primal_residual": float(primal.std(ddof=0)) if len(primal) > 1 else 0.0,
+                "mean_dual_residual": float(dual.mean()) if len(dual) > 0 else np.nan,
+                "std_dual_residual": float(dual.std(ddof=0)) if len(dual) > 1 else 0.0,
+                "mean_duality_gap": float(gap.mean()) if len(gap) > 0 else np.nan,
+                "std_duality_gap": float(gap.std(ddof=0)) if len(gap) > 1 else 0.0,
+                **tier_counts,
             }
         )
 
@@ -193,6 +225,96 @@ def write_summary_tables(df: pd.DataFrame, out_dir: Path) -> None:
         sdf.to_latex(index=False, float_format=lambda x: f"{x:.4g}"),
         encoding="utf-8",
     )
+
+
+def write_accuracy_iterations_table(df: pd.DataFrame, out_dir: Path) -> None:
+    if df.empty:
+        return
+
+    rows = []
+    for solver, g in df.groupby("solver"):
+        primal = _numeric_series(g, "metrics.primal_residual")
+        dual = _numeric_series(g, "metrics.dual_residual")
+        gap = _numeric_series(g, "metrics.duality_gap")
+        iters = _numeric_series(g, "metadata.solver_iterations_mean")
+
+        rows.append(
+            {
+                "solver": solver,
+                "primal_mean": float(primal.mean()) if not primal.dropna().empty else np.nan,
+                "primal_std": float(primal.std(ddof=0)) if not primal.dropna().empty else np.nan,
+                "dual_mean": float(dual.mean()) if not dual.dropna().empty else np.nan,
+                "dual_std": float(dual.std(ddof=0)) if not dual.dropna().empty else np.nan,
+                "gap_mean": float(gap.mean()) if not gap.dropna().empty else np.nan,
+                "gap_std": float(gap.std(ddof=0)) if not gap.dropna().empty else np.nan,
+                "iter_mean": float(iters.mean()) if not iters.dropna().empty else np.nan,
+                "iter_std": float(iters.std(ddof=0)) if not iters.dropna().empty else np.nan,
+            }
+        )
+
+    sdf = pd.DataFrame(rows).sort_values("solver")
+    sdf.to_markdown(out_dir / "accuracy_iterations_table.md", index=False)
+    (out_dir / "accuracy_iterations_table.tex").write_text(
+        sdf.to_latex(index=False, float_format=lambda x: f"{x:.4g}"),
+        encoding="utf-8",
+    )
+
+
+def plot_accuracy_iterations_errorbars(df: pd.DataFrame, out_dir: Path) -> None:
+    if df.empty:
+        return
+
+    summary_rows = []
+    for solver, g in df.groupby("solver"):
+        primal = _numeric_series(g, "metrics.primal_residual").dropna()
+        dual = _numeric_series(g, "metrics.dual_residual").dropna()
+        gap = _numeric_series(g, "metrics.duality_gap").dropna()
+        iters = _numeric_series(g, "metadata.solver_iterations_mean").dropna()
+        summary_rows.append(
+            {
+                "solver": solver,
+                "primal_mean": float(primal.mean()) if not primal.empty else np.nan,
+                "primal_std": float(primal.std(ddof=0)) if len(primal) > 1 else 0.0,
+                "dual_mean": float(dual.mean()) if not dual.empty else np.nan,
+                "dual_std": float(dual.std(ddof=0)) if len(dual) > 1 else 0.0,
+                "gap_mean": float(gap.mean()) if not gap.empty else np.nan,
+                "gap_std": float(gap.std(ddof=0)) if len(gap) > 1 else 0.0,
+                "iter_mean": float(iters.mean()) if not iters.empty else np.nan,
+                "iter_std": float(iters.std(ddof=0)) if len(iters) > 1 else 0.0,
+            }
+        )
+
+    sdf = pd.DataFrame(summary_rows).dropna(subset=["solver"])
+    if sdf.empty:
+        return
+
+    x = np.arange(len(sdf))
+    labels = sdf["solver"].tolist()
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes = axes.flatten()
+    plots = [
+        ("primal_mean", "primal_std", "Primal Residual"),
+        ("dual_mean", "dual_std", "Dual Residual"),
+        ("gap_mean", "gap_std", "Duality Gap"),
+        ("iter_mean", "iter_std", "Iterations"),
+    ]
+    for ax, (mcol, ecol, title) in zip(axes, plots):
+        y = pd.to_numeric(sdf[mcol], errors="coerce").to_numpy()
+        yerr = pd.to_numeric(sdf[ecol], errors="coerce").to_numpy()
+        ax.errorbar(x, y, yerr=yerr, fmt="o", capsize=4)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20, ha="right")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.25)
+        if "Residual" in title or "Gap" in title:
+            positive = y[y > 0]
+            if len(positive) > 0:
+                ax.set_yscale("log")
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "accuracy_iterations_errorbars.pdf")
+    plt.close(fig)
 
 
 def main() -> None:
@@ -215,6 +337,8 @@ def main() -> None:
     plot_workload_scaling(df, out_dir)
     plot_memory_vs_throughput(df, out_dir)
     write_summary_tables(df, out_dir)
+    write_accuracy_iterations_table(df, out_dir)
+    plot_accuracy_iterations_errorbars(df, out_dir)
 
 
 if __name__ == "__main__":

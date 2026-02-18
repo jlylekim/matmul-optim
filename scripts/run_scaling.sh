@@ -6,7 +6,9 @@ export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 # Required by PyTorch for deterministic CuBLAS behavior.
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
-OUT_BASE="${1:-${ROOT_DIR}/artifacts/scaling}"
+STAMP="$(date +"%Y%m%d_%H%M%S")"
+OUT_BASE="${1:-${ROOT_DIR}/results/scaling_${STAMP}}"
+PRESET="${SCALING_PRESET:-quick}"
 AVAILABLE_GPUS="$(python - <<'PY'
 import torch
 print(torch.cuda.device_count() if torch.cuda.is_available() else 1)
@@ -34,12 +36,14 @@ for NPROC in "${FILTERED[@]}"; do
   torchrun --standalone --nproc_per_node="${NPROC}" "${ROOT_DIR}/benchmarks/reproduce.py" \
     --output "${OUT_DIR}/strong" \
     --study strong \
+    --preset "${PRESET}" \
     --repeats 3 \
     --warmups 1
 
   torchrun --standalone --nproc_per_node="${NPROC}" "${ROOT_DIR}/benchmarks/reproduce.py" \
     --output "${OUT_DIR}/weak" \
     --study weak \
+    --preset "${PRESET}" \
     --repeats 3 \
     --warmups 1
 

@@ -9,6 +9,14 @@ from gemm_kkt.baselines.base import BaselineResult, BaselineRunConfig, unavailab
 from gemm_kkt.solvers.types import DenseBatchLP, DenseBatchQP
 
 
+def _qp_primal_residual(A: np.ndarray, l: np.ndarray, u: np.ndarray, x: np.ndarray) -> float:
+    Ax = A @ x
+    viol = np.maximum(l - Ax, 0.0) + np.maximum(Ax - u, 0.0)
+    numer = float(np.linalg.norm(viol))
+    denom = 1.0 + max(float(np.linalg.norm(l)), float(np.linalg.norm(u)), float(np.linalg.norm(Ax)))
+    return numer / max(denom, 1e-12)
+
+
 def run_osqp_qp(problem: DenseBatchQP, config: BaselineRunConfig | None = None) -> BaselineResult:
     cfg = config or BaselineRunConfig()
     try:
@@ -66,6 +74,91 @@ def run_osqp_qp(problem: DenseBatchQP, config: BaselineRunConfig | None = None) 
             "warm_start": cfg.warm_start,
             "max_iters": cfg.max_iters,
             "tol_absrel": min(cfg.tol_p, cfg.tol_d),
+        },
+    )
+
+
+def run_scipy_trust_constr_qp(problem: DenseBatchQP, config: BaselineRunConfig | None = None) -> BaselineResult:
+    cfg = config or BaselineRunConfig()
+    try:
+        import scipy
+        from scipy.optimize import LinearConstraint, minimize
+    except Exception as exc:
+        return unavailable_result("SciPyTrustConstr", f"SciPy optimize dependencies missing: {exc}")
+
+    p = problem.as_batched().expanded()
+    if p.batch_size != 1:
+        return unavailable_result("SciPyTrustConstr", "Wrapper currently supports batch_size=1 for CPU baseline")
+
+    P = p.P.squeeze(0).detach().cpu().numpy().astype(np.float64)
+    q = p.q.squeeze(0).detach().cpu().numpy().astype(np.float64)
+    A = p.A.squeeze(0).detach().cpu().numpy().astype(np.float64)
+    l = p.l.squeeze(0).detach().cpu().numpy().astype(np.float64)
+    u = p.u.squeeze(0).detach().cpu().numpy().astype(np.float64)
+
+    x0 = np.zeros_like(q)
+    linear = LinearConstraint(A, l, u)
+
+    def fun(x: np.ndarray) -> float:
+        return float(0.5 * x.dot(P).dot(x) + q.dot(x))
+
+    def jac(x: np.ndarray) -> np.ndarray:
+        return P.dot(x) + q
+
+    def hess(_: np.ndarray) -> np.ndarray:
+        return P
+
+    t0 = time.perf_counter()
+    result = minimize(
+        fun=fun,
+        x0=x0,
+        method="trust-constr",
+        jac=jac,
+        hess=hess,
+        constraints=[linear],
+        options={
+            "maxiter": int(cfg.max_iters),
+            "gtol": float(min(cfg.tol_p, cfg.tol_d)),
+            "xtol": float(min(cfg.tol_p, cfg.tol_d)),
+            "barrier_tol": float(cfg.tol_g),
+            "verbose": 0,
+        },
+    )
+    solve_time = time.perf_counter() - t0
+
+    msg = str(result.message).lower()
+    if bool(result.success):
+        status = "solved"
+    elif "max" in msg and "iter" in msg:
+        status = "max_iters"
+    else:
+        status = "failed"
+
+    primal_res = _qp_primal_residual(A=A, l=l, u=u, x=result.x)
+    metrics = {
+        "primal_residual": float(primal_res),
+        "dual_residual": float(getattr(result, "optimality", np.nan)),
+        "duality_gap": float("nan"),
+        "objective_value": float(result.fun),
+    }
+
+    return BaselineResult(
+        name="SciPyTrustConstr",
+        status=status,
+        solve_time_s=solve_time,
+        metrics=metrics,
+        version=getattr(scipy, "__version__", None),
+        device="cpu",
+        metadata={
+            "presolve": cfg.presolve,
+            "warm_start": cfg.warm_start,
+            "max_iters": cfg.max_iters,
+            "tol_p": cfg.tol_p,
+            "tol_d": cfg.tol_d,
+            "tol_g": cfg.tol_g,
+            "raw_message": str(result.message),
+            "success": bool(result.success),
+            "nit": int(getattr(result, "nit", 0)),
         },
     )
 
