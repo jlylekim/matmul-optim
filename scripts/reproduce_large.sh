@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+export MPLBACKEND="${MPLBACKEND:-Agg}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 STAMP="$(date +"%Y%m%d_%H%M%S")"
 OUT_DIR="${REPRO_LARGE_OUT_DIR:-${ROOT_DIR}/results/large_${STAMP}}"
 mkdir -p "${OUT_DIR}"

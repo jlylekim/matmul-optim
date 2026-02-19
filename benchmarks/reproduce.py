@@ -369,17 +369,24 @@ def _planned_experiment_count(
     per_gpu_batch: int,
     strong_total_batch: int,
     include_cpu_baselines: bool,
+    include_splitting: bool,
+    include_portfolio: bool,
+    include_lp: bool,
 ) -> int:
     total = 0
     for study in studies:
         if study == "main":
             dense = _make_main_configs(device, seed, preset)
-            total += 3 * len(dense)  # ipm_ns + ipm_robust + splitting
-            total += len(_make_portfolio_configs(device, seed, preset))  # robust on portfolio
-            total += len(_make_lp_configs(device, seed, preset))  # gpu lp
+            dense_solver_count = 2 + (1 if include_splitting else 0)
+            total += dense_solver_count * len(dense)  # ipm_ns + ipm_robust (+optional splitting)
+            if include_portfolio:
+                total += len(_make_portfolio_configs(device, seed, preset))  # robust on portfolio
+            if include_lp:
+                total += len(_make_lp_configs(device, seed, preset))  # gpu lp
             if include_cpu_baselines:
                 total += 2 * len(dense)  # scipy trust-constr + osqp
-                total += len(_make_lp_configs(device, seed, preset))  # highs
+                if include_lp:
+                    total += len(_make_lp_configs(device, seed, preset))  # highs
         else:
             _ = _make_scaling_config(
                 device,
@@ -389,7 +396,7 @@ def _planned_experiment_count(
                 per_gpu_batch,
                 strong_total_batch,
             )
-            total += 3  # one dense config, three gpu solvers
+            total += 2 + (1 if include_splitting else 0)  # one dense config, two IPM solvers (+optional splitting)
     return total
 
 
@@ -617,6 +624,10 @@ def _maybe_autolaunch_torchrun(args: argparse.Namespace) -> None:
     ]
     if args.disable_ns_grid_search:
         cmd.append("--disable-ns-grid-search")
+    if args.skip_splitting:
+        cmd.append("--skip-splitting")
+    if args.focus_ns_baselines:
+        cmd.append("--focus-ns-baselines")
     if args.eval_tiers:
         cmd.append("--eval-tiers")
         cmd.extend(str(t) for t in args.eval_tiers)
@@ -671,6 +682,16 @@ def main() -> None:
         help="Disable NS-IPM hyperparameter search and use static defaults",
     )
     parser.add_argument(
+        "--skip-splitting",
+        action="store_true",
+        help="Skip gemm_splitting_qp runs",
+    )
+    parser.add_argument(
+        "--focus-ns-baselines",
+        action="store_true",
+        help="Run only NS-IPM variants + reliable CPU QP baselines (skip splitting/portfolio/LP)",
+    )
+    parser.add_argument(
         "--ns-grid-tune-batch",
         type=int,
         default=8,
@@ -718,6 +739,14 @@ def main() -> None:
     use_cuda = str(device).startswith("cuda")
     tol = float(args.target_tol)
     iter_scale = max(float(args.max_iter_scale), 0.1)
+    include_splitting = not args.skip_splitting
+    include_portfolio = True
+    include_lp = True
+    include_cpu_baselines = True
+    if args.focus_ns_baselines:
+        include_splitting = False
+        include_portfolio = False
+        include_lp = False
 
     base_ipm_ns_cfg = GEMMIPMConfig(
         kkt_mode="ns_only",
@@ -741,14 +770,13 @@ def main() -> None:
         tol_d=tol,
         max_iters=max(2000, int(round((50_000 if args.preset == "large" else 20_000) * iter_scale))),
     )
-
-    split = GemmSplittingQPSolver(split_cfg)
+    split = GemmSplittingQPSolver(split_cfg) if include_splitting else None
     lp_cfg = LPFirstOrderConfig(
         max_iters=max(8000, int(round((120_000 if args.preset == "large" else 80_000) * iter_scale))),
         tol_p=tol,
         tol_d=tol,
     )
-    lp_solver = LPFirstOrderSolver(lp_cfg)
+    lp_solver = LPFirstOrderSolver(lp_cfg) if include_lp else None
 
     records: list[Any] = []
 
@@ -766,14 +794,18 @@ def main() -> None:
         world_size=world_size,
         per_gpu_batch=args.per_gpu_batch,
         strong_total_batch=args.strong_total_batch,
-        include_cpu_baselines=True,
+        include_cpu_baselines=include_cpu_baselines,
+        include_splitting=include_splitting,
+        include_portfolio=include_portfolio,
+        include_lp=include_lp,
     )
     total_experiments = max(0, min(raw_total_experiments, int(args.max_experiments)))
     if rank == 0:
         print(
             f"[plan] studies={studies}, preset={args.preset}, world_size={world_size}, "
             f"planned_experiments={total_experiments} (raw={raw_total_experiments}), rank0_device={device}, "
-            f"target_tol={tol:.2e}, max_iter_scale={iter_scale:.2f}",
+            f"target_tol={tol:.2e}, max_iter_scale={iter_scale:.2f}, "
+            f"splitting={include_splitting}, portfolio={include_portfolio}, lp={include_lp}",
             flush=True,
         )
     progress = 0
@@ -913,35 +945,36 @@ def main() -> None:
                 records.append(rec)
                 _log_end("gemm_ipm_robust", rec.status, rec.timing.median_s)
 
-            if not _reserve_slot():
-                stop_all = True
-                break
-            _log_start("gemm_splitting_qp", problem_id)
-            rec = run_qp_solver(
-                run_id=f"{study}_run_{idx}_gemm_split",
-                problem_id=problem_id,
-                solver_name="gemm_splitting_qp",
-                solver=split.solve,
-                problem=problem,
-                warmups=args.warmups,
-                repeats=args.repeats,
-                tol_p=split_cfg.tol_p,
-                tol_d=split_cfg.tol_d,
-                tol_g=1e9,
-                tiers=args.eval_tiers,
-                extra_metadata={
-                    "experiment": "parametric_qp",
-                    "study": study,
-                    "preset": args.preset,
-                    "config": cfg_payload,
-                    "eval_tiers": args.eval_tiers,
-                },
-            )
-            if rec is not None:
-                records.append(rec)
-                _log_end("gemm_splitting_qp", rec.status, rec.timing.median_s)
+            if include_splitting and split is not None:
+                if not _reserve_slot():
+                    stop_all = True
+                    break
+                _log_start("gemm_splitting_qp", problem_id)
+                rec = run_qp_solver(
+                    run_id=f"{study}_run_{idx}_gemm_split",
+                    problem_id=problem_id,
+                    solver_name="gemm_splitting_qp",
+                    solver=split.solve,
+                    problem=problem,
+                    warmups=args.warmups,
+                    repeats=args.repeats,
+                    tol_p=split_cfg.tol_p,
+                    tol_d=split_cfg.tol_d,
+                    tol_g=1e9,
+                    tiers=args.eval_tiers,
+                    extra_metadata={
+                        "experiment": "parametric_qp",
+                        "study": study,
+                        "preset": args.preset,
+                        "config": cfg_payload,
+                        "eval_tiers": args.eval_tiers,
+                    },
+                )
+                if rec is not None:
+                    records.append(rec)
+                    _log_end("gemm_splitting_qp", rec.status, rec.timing.median_s)
 
-            if study == "main":
+            if study == "main" and include_cpu_baselines:
                 if not _reserve_slot():
                     stop_all = True
                     break
@@ -1000,7 +1033,7 @@ def main() -> None:
         if stop_all:
             break
 
-        if study == "main":
+        if study == "main" and include_portfolio:
             for idx, cfg in enumerate(_make_portfolio_configs(device, args.seed, args.preset)):
                 if stop_all:
                     break
@@ -1037,6 +1070,7 @@ def main() -> None:
                     records.append(rec)
                     _log_end("gemm_ipm_robust", rec.status, rec.timing.median_s)
 
+        if study == "main" and include_lp and lp_solver is not None:
             for idx, cfg in enumerate(_make_lp_configs(device, args.seed, args.preset)):
                 if stop_all:
                     break
@@ -1071,6 +1105,8 @@ def main() -> None:
                     records.append(rec)
                     _log_end("lp_first_order_gpu", rec.status, rec.timing.median_s)
 
+                if not include_cpu_baselines:
+                    continue
                 if not _reserve_slot():
                     stop_all = True
                     break

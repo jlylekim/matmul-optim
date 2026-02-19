@@ -8,6 +8,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+SOLVER_LABELS = {
+    "gemm_ipm_ns": "ns_ipm",
+    "gemm_ipm_robust": "ns_ipm_rb",
+    "scipy_trust_constr_cpu": "scipy_trust_cpu",
+    "osqp_cpu": "osqp_cpu",
+    "gemm_splitting_qp": "split_qp",
+    "lp_first_order_gpu": "lp_pdhg_gpu",
+    "highs_cpu": "highs_cpu",
+}
+
 
 def _load_df(path: str | Path) -> pd.DataFrame:
     rows = []
@@ -31,6 +41,27 @@ def _numeric_series(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_numeric(df[col], errors="coerce")
 
 
+def _solver_label(solver: str) -> str:
+    return SOLVER_LABELS.get(solver, solver)
+
+
+def _filter_df(
+    df: pd.DataFrame,
+    *,
+    category: str,
+    include_solvers: list[str] | None,
+    exclude_solvers: list[str] | None,
+) -> pd.DataFrame:
+    out = df
+    if category != "all" and "category" in out.columns:
+        out = out[out["category"] == category]
+    if include_solvers:
+        out = out[out["solver"].isin(include_solvers)]
+    if exclude_solvers:
+        out = out[~out["solver"].isin(exclude_solvers)]
+    return out
+
+
 def write_accuracy_time_summary(df: pd.DataFrame, out_dir: Path) -> None:
     if df.empty:
         return
@@ -45,7 +76,7 @@ def write_accuracy_time_summary(df: pd.DataFrame, out_dir: Path) -> None:
 
         rows.append(
             {
-                "solver": solver,
+                "solver": _solver_label(solver),
                 "n": int(len(g)),
                 "solved": int(solved.sum()) if not solved.empty else 0,
                 "t_med_s": float(np.median(times)) if len(times) > 0 else np.nan,
@@ -88,7 +119,7 @@ def plot_accuracy_vs_time(df: pd.DataFrame, out_dir: Path) -> None:
             xv = x[valid]
             yv = y[valid]
             order = np.argsort(xv)
-            ax.plot(xv[order], yv[order], marker="o", linestyle="-", label=solver)
+            ax.plot(xv[order], yv[order], marker="o", linestyle="-", label=_solver_label(solver))
 
         ax.set_xscale("log")
         ax.set_yscale("log")
@@ -110,6 +141,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create benchmark plots")
     parser.add_argument("--input", type=str, required=True, help="Path to results.jsonl")
     parser.add_argument("--output", type=str, required=True, help="Output directory")
+    parser.add_argument(
+        "--category",
+        type=str,
+        choices=["all", "qp_conic", "lp"],
+        default="all",
+        help="Optional category filter before plotting",
+    )
+    parser.add_argument(
+        "--include-solvers",
+        nargs="*",
+        default=None,
+        help="Only include these solver ids",
+    )
+    parser.add_argument(
+        "--exclude-solvers",
+        nargs="*",
+        default=None,
+        help="Exclude these solver ids",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output)
@@ -118,6 +168,15 @@ def main() -> None:
     df = _load_df(args.input)
     if df.empty:
         print("No rows found in results file")
+        return
+    df = _filter_df(
+        df,
+        category=args.category,
+        include_solvers=args.include_solvers,
+        exclude_solvers=args.exclude_solvers,
+    )
+    if df.empty:
+        print("No rows left after filters")
         return
 
     write_accuracy_time_summary(df, out_dir)

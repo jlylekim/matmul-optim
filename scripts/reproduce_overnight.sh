@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+export MPLBACKEND="${MPLBACKEND:-Agg}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
 TARGET_HOURS="${TARGET_HOURS:-10}"
+OVERNIGHT_MAX_EXPERIMENTS="${OVERNIGHT_MAX_EXPERIMENTS:-10}"
 STAMP="$(date +"%Y%m%d_%H%M%S")"
 OUT_BASE="${OVERNIGHT_OUT_DIR:-${ROOT_DIR}/results/overnight_${STAMP}}"
 mkdir -p "${OUT_BASE}"
@@ -46,7 +49,9 @@ run_case() {
     --study main \
     --repeats 5 \
     --warmups 1 \
-    --max-experiments 24 \
+    --max-experiments "${OVERNIGHT_MAX_EXPERIMENTS}" \
+    --skip-splitting \
+    --focus-ns-baselines \
     --target-tol 1e-2 \
     --max-iter-scale 2.0 \
     --eval-tiers 1e-1 5e-2 1e-2 \
@@ -59,7 +64,9 @@ run_case() {
   if [[ "${status}" == "ok" ]]; then
     python "${ROOT_DIR}/benchmarks/plots.py" \
       --input "${case_dir}/results.jsonl" \
-      --output "${case_dir}" || true
+      --output "${case_dir}" \
+      --category qp_conic \
+      --include-solvers gemm_ipm_ns gemm_ipm_robust scipy_trust_constr_cpu osqp_cpu || true
   fi
 
   case_end="$(date +%s)"
@@ -116,7 +123,9 @@ PY
 mkdir -p "${OUT_BASE}/combined"
 python "${ROOT_DIR}/benchmarks/plots.py" \
   --input "${OUT_BASE}/combined_results.jsonl" \
-  --output "${OUT_BASE}/combined" || true
+  --output "${OUT_BASE}/combined" \
+  --category qp_conic \
+  --include-solvers gemm_ipm_ns gemm_ipm_robust scipy_trust_constr_cpu osqp_cpu || true
 
 echo "[overnight] done"
 echo "[overnight] output base: ${OUT_BASE}"

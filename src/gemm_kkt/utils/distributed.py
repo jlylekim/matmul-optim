@@ -28,7 +28,15 @@ def init_distributed(backend: str = "nccl") -> DistInfo:
         return DistInfo()
 
     if not dist.is_initialized():
-        dist.init_process_group(backend=backend)
+        if torch.cuda.is_available():
+            # Newer torch versions can record the rank->device mapping at init;
+            # fallback keeps compatibility with older versions.
+            try:
+                dist.init_process_group(backend=backend, device_id=torch.device(f"cuda:{local_rank}"))
+            except TypeError:
+                dist.init_process_group(backend=backend)
+        else:
+            dist.init_process_group(backend=backend)
 
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -38,7 +46,10 @@ def init_distributed(backend: str = "nccl") -> DistInfo:
 
 def barrier_if_distributed(info: DistInfo) -> None:
     if info.is_distributed and dist.is_initialized():
-        dist.barrier()
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[info.local_rank])
+        else:
+            dist.barrier()
 
 
 def gather_objects(info: DistInfo, obj: Any) -> list[Any]:

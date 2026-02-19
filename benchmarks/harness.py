@@ -316,10 +316,11 @@ def run_qp_solver(
     md["tier_pass"] = tier_pass
     md["best_tier"] = best_tier
     if tol_p is not None and tol_d is not None and tol_g is not None:
+        gap_val = _as_float_or_inf(metrics.get("duality_gap", float("inf")))
         pass_flag = (
-            float(metrics.get("primal_residual", float("inf"))) <= tol_p
-            and float(metrics.get("dual_residual", float("inf"))) <= tol_d
-            and float(metrics.get("duality_gap", float("inf"))) <= tol_g
+            _as_float_or_inf(metrics.get("primal_residual", float("inf"))) <= tol_p
+            and _as_float_or_inf(metrics.get("dual_residual", float("inf"))) <= tol_d
+            and ((gap_val <= tol_g) if math.isfinite(gap_val) else True)
         )
         md["stopping_pass"] = pass_flag
     if extra_metadata:

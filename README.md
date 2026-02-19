@@ -81,17 +81,24 @@ Optional time budget override (hours):
 TARGET_HOURS=8 bash scripts/reproduce_overnight.sh
 ```
 
+Optional overnight experiment-cap override (per case):
+
+```bash
+OVERNIGHT_MAX_EXPERIMENTS=12 TARGET_HOURS=8 bash scripts/reproduce_overnight.sh
+```
+
 `benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
 By default, each reproduce invocation is capped at `10` experiments total (`--max-experiments`).
 NS-IPM hyperparameter grid search is enabled by default and can be disabled with `--disable-ns-grid-search`.
 Recommended discovery presets are `ns_favor`, `mixed`, and `stress`.
+Overnight sweep mode is intentionally focused on NS-IPM vs reliable CPU QP baselines (`--skip-splitting --focus-ns-baselines`).
 To force single-process behavior:
 
 ```bash
 python benchmarks/reproduce.py --output results/manual_run_YYYYmmdd_HHMMSS --study all --no-auto-distributed --max-experiments 10 --preset mixed --target-tol 1e-2 --max-iter-scale 2.0
 ```
 
-Benchmark logs include standardized pass/fail tiers at `1e-2`, `1e-3`, and `1e-4`
+Benchmark logs include standardized pass/fail tiers (default `1e-1`, `5e-2`, `1e-2`)
 (`metadata.tier_pass.*`) in addition to solver-native stopping status.
 
 Run strong/weak multi-GPU scaling (1,2,4,8 ranks):
@@ -105,7 +112,7 @@ Results are written to timestamped directories under `results/` (for example `re
 - JSONL run logs
 - markdown + LaTeX summary table (`summary_table.*`) with accuracy/time only
 - PDF plots (`accuracy_vs_time.pdf`) with accuracy/time only
-- overnight runs additionally save `manifest.csv` and `combined_results.jsonl`
+- overnight runs additionally save `manifest.csv` and `combined_results.jsonl` and filter plots to QP NS-vs-baseline solvers
 
 ## Repository layout
 
