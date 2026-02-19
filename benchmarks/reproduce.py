@@ -674,7 +674,7 @@ def main() -> None:
         "--max-experiments",
         type=int,
         default=10,
-        help="Maximum number of experiments to execute in one reproduce run",
+        help="Maximum number of experiments to execute in one reproduce run (<=0 means no cap)",
     )
     parser.add_argument(
         "--disable-ns-grid-search",
@@ -799,13 +799,20 @@ def main() -> None:
         include_portfolio=include_portfolio,
         include_lp=include_lp,
     )
-    total_experiments = max(0, min(raw_total_experiments, int(args.max_experiments)))
+    requested_cap = int(args.max_experiments)
+    if requested_cap <= 0:
+        total_experiments = raw_total_experiments
+    else:
+        total_experiments = min(raw_total_experiments, requested_cap)
+    total_experiments = max(0, total_experiments)
     if rank == 0:
+        cap_desc = "all" if requested_cap <= 0 else str(requested_cap)
         print(
             f"[plan] studies={studies}, preset={args.preset}, world_size={world_size}, "
             f"planned_experiments={total_experiments} (raw={raw_total_experiments}), rank0_device={device}, "
             f"target_tol={tol:.2e}, max_iter_scale={iter_scale:.2f}, "
-            f"splitting={include_splitting}, portfolio={include_portfolio}, lp={include_lp}",
+            f"splitting={include_splitting}, portfolio={include_portfolio}, lp={include_lp}, "
+            f"max_experiments={cap_desc}",
             flush=True,
         )
     progress = 0

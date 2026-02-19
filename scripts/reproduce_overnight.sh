@@ -8,7 +8,8 @@ export MPLBACKEND="${MPLBACKEND:-Agg}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
 TARGET_HOURS="${TARGET_HOURS:-10}"
-OVERNIGHT_MAX_EXPERIMENTS="${OVERNIGHT_MAX_EXPERIMENTS:-10}"
+# <=0 means "run all planned experiments" for the given case.
+OVERNIGHT_MAX_EXPERIMENTS="${OVERNIGHT_MAX_EXPERIMENTS:-0}"
 STAMP="$(date +"%Y%m%d_%H%M%S")"
 OUT_BASE="${OVERNIGHT_OUT_DIR:-${ROOT_DIR}/results/overnight_${STAMP}}"
 mkdir -p "${OUT_BASE}"
