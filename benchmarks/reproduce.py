@@ -154,6 +154,53 @@ def _baseline_to_record(
 
 
 def _make_main_configs(device: str, seed: int, preset: str) -> list[DenseParametricQPConfig]:
+    if preset == "a100_heavy":
+        return [
+            DenseParametricQPConfig(
+                batch_size=192,
+                n=512,
+                m=1024,
+                condition_number=1e4,
+                tightness=0.35,
+                rhs_count=4,
+                shared_matrices=True,
+                seed=seed,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=128,
+                n=768,
+                m=1536,
+                condition_number=5e4,
+                tightness=0.25,
+                rhs_count=3,
+                shared_matrices=True,
+                seed=seed + 1,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=96,
+                n=1024,
+                m=2048,
+                condition_number=1e5,
+                tightness=0.2,
+                rhs_count=2,
+                shared_matrices=True,
+                seed=seed + 2,
+                device=device,
+            ),
+            DenseParametricQPConfig(
+                batch_size=64,
+                n=1280,
+                m=2560,
+                condition_number=3e5,
+                tightness=0.15,
+                rhs_count=2,
+                shared_matrices=True,
+                seed=seed + 3,
+                device=device,
+            ),
+        ]
     if preset == "ns_favor":
         return [
             DenseParametricQPConfig(
@@ -309,6 +356,11 @@ def _make_main_configs(device: str, seed: int, preset: str) -> list[DenseParamet
 
 
 def _make_portfolio_configs(device: str, seed: int, preset: str) -> list[PortfolioQPConfig]:
+    if preset == "a100_heavy":
+        return [
+            PortfolioQPConfig(batch_size=96, n_assets=512, n_factors=16, seed=seed + 10, device=device),
+            PortfolioQPConfig(batch_size=64, n_assets=768, n_factors=24, seed=seed + 11, device=device),
+        ]
     if preset in ("ns_favor", "mixed", "stress"):
         return [
             PortfolioQPConfig(batch_size=128, n_assets=256, n_factors=12, seed=seed + 10, device=device),
@@ -326,6 +378,11 @@ def _make_portfolio_configs(device: str, seed: int, preset: str) -> list[Portfol
 
 
 def _make_lp_configs(device: str, seed: int, preset: str) -> list[BatchedLPConfig]:
+    if preset == "a100_heavy":
+        return [
+            BatchedLPConfig(batch_size=256, n=1024, m=512, seed=seed + 20, device=device),
+            BatchedLPConfig(batch_size=192, n=1536, m=768, seed=seed + 21, device=device),
+        ]
     if preset in ("ns_favor", "mixed", "stress"):
         return [
             BatchedLPConfig(batch_size=256, n=512, m=256, seed=seed + 20, device=device),
@@ -644,7 +701,7 @@ def main() -> None:
     parser.add_argument(
         "--preset",
         type=str,
-        choices=["quick", "large", "ns_favor", "mixed", "stress"],
+        choices=["quick", "large", "a100_heavy", "ns_favor", "mixed", "stress"],
         default="quick",
         help="Experiment preset (`ns_favor`/`mixed`/`stress` recommended for discovery sweeps)",
     )

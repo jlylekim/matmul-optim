@@ -89,6 +89,18 @@ OVERNIGHT_MAX_EXPERIMENTS=12 TARGET_HOURS=8 bash scripts/reproduce_overnight.sh
 
 `OVERNIGHT_MAX_EXPERIMENTS<=0` means "run all planned experiments" for each case (this is the overnight default).
 
+Run a larger 8xA100-oriented comprehensive overnight (all methods/categories, `study=all`):
+
+```bash
+bash scripts/reproduce_10h_comprehensive.sh
+```
+
+Useful overrides:
+
+```bash
+TARGET_HOURS=10 MAX_EXPERIMENTS_PER_CASE=0 REPEATS=7 WARMUPS=2 bash scripts/reproduce_10h_comprehensive.sh
+```
+
 `benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
 By default, each reproduce invocation is capped at `10` experiments total (`--max-experiments`).
 NS-IPM hyperparameter grid search is enabled by default and can be disabled with `--disable-ns-grid-search`.
