@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 
 SOLVER_LABELS = {
     "gemm_ipm_ns": "ns_ipm",
@@ -16,6 +17,16 @@ SOLVER_LABELS = {
     "gemm_splitting_qp": "split_qp",
     "lp_first_order_gpu": "lp_pdhg_gpu",
     "highs_cpu": "highs_cpu",
+}
+
+SOLVER_STYLE = {
+    "gemm_ipm_ns": {"color": "#1f77b4", "marker": "o"},
+    "gemm_ipm_robust": {"color": "#d62728", "marker": "s"},
+    "gemm_splitting_qp": {"color": "#2ca02c", "marker": "^"},
+    "lp_first_order_gpu": {"color": "#ff7f0e", "marker": "D"},
+    "scipy_trust_constr_cpu": {"color": "#9467bd", "marker": "P"},
+    "osqp_cpu": {"color": "#8c564b", "marker": "X"},
+    "highs_cpu": {"color": "#17becf", "marker": "v"},
 }
 
 
@@ -43,6 +54,10 @@ def _numeric_series(df: pd.DataFrame, col: str) -> pd.Series:
 
 def _solver_label(solver: str) -> str:
     return SOLVER_LABELS.get(solver, solver)
+
+
+def _solver_style(solver: str) -> dict[str, str]:
+    return SOLVER_STYLE.get(solver, {"color": "#7f7f7f", "marker": "o"})
 
 
 def _filter_df(
@@ -109,8 +124,10 @@ def plot_accuracy_vs_time(df: pd.DataFrame, out_dir: Path) -> None:
         ("metrics.dual_residual", "Dual residual"),
     ]
 
+    solver_order = sorted(df["solver"].dropna().unique().tolist())
     for ax, (metric_col, metric_label) in zip(axes, metrics):
-        for solver, sdf in df.groupby("solver"):
+        for solver in solver_order:
+            sdf = df[df["solver"] == solver]
             x = _numeric_series(sdf, "median_s").to_numpy()
             y = _numeric_series(sdf, metric_col).to_numpy()
             valid = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
@@ -119,7 +136,17 @@ def plot_accuracy_vs_time(df: pd.DataFrame, out_dir: Path) -> None:
             xv = x[valid]
             yv = y[valid]
             order = np.argsort(xv)
-            ax.plot(xv[order], yv[order], marker="o", linestyle="-", label=_solver_label(solver))
+            style = _solver_style(solver)
+            ax.plot(
+                xv[order],
+                yv[order],
+                marker=style["marker"],
+                linestyle="-",
+                linewidth=1.5,
+                markersize=5,
+                color=style["color"],
+                label=_solver_label(solver),
+            )
 
         ax.set_xscale("log")
         ax.set_yscale("log")
@@ -129,10 +156,31 @@ def plot_accuracy_vs_time(df: pd.DataFrame, out_dir: Path) -> None:
 
     axes[0].set_title("Primal Accuracy vs Time")
     axes[1].set_title("Dual Accuracy vs Time")
-    handles, labels = axes[0].get_legend_handles_labels()
-    if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=min(4, len(labels)))
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    legend_handles: list[Line2D] = []
+    for solver in solver_order:
+        style = _solver_style(solver)
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=style["color"],
+                marker=style["marker"],
+                linestyle="-",
+                linewidth=1.5,
+                markersize=5,
+                label=_solver_label(solver),
+            )
+        )
+    if legend_handles:
+        fig.legend(
+            handles=legend_handles,
+            loc="upper center",
+            ncol=min(4, len(legend_handles)),
+            title="Method",
+            frameon=True,
+            framealpha=0.9,
+        )
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
     fig.savefig(out_dir / "accuracy_vs_time.pdf")
     plt.close(fig)
 
