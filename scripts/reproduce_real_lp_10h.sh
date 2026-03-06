@@ -10,6 +10,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 TARGET_HOURS="${TARGET_HOURS:-10}"
 SEEDS="${SEEDS:-0 1 2 3}"
 SUITES="${SUITES:-netlib stochlp misc}"
+SOLVERS="${SOLVERS:-lp_first_order_gpu gemm_ipm_ns gemm_ipm_robust gemm_splitting_qp highs_cpu scipy_trust_constr_cpu osqp_cpu}"
 MAX_INSTANCES_PER_CASE="${MAX_INSTANCES_PER_CASE:-0}"
 SOLVE_TIMEOUT_S="${SOLVE_TIMEOUT_S:-1800}"
 INSTANCE_TIMEOUT_S="${INSTANCE_TIMEOUT_S:-3600}"
@@ -19,11 +20,16 @@ WARMUPS="${WARMUPS:-0}"
 TARGET_TOL="${TARGET_TOL:-1e-2}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 U_CAP="${U_CAP:-1e8}"
+IPM_MAX_ITERS="${IPM_MAX_ITERS:-80}"
+ROBUST_MAX_ITERS="${ROBUST_MAX_ITERS:-120}"
+SPLIT_MAX_ITERS="${SPLIT_MAX_ITERS:-20000}"
+LP_MAX_ITERS="${LP_MAX_ITERS:-8000}"
 MAX_GPUS="${MAX_GPUS:-0}"
 STAMP="$(date +"%Y%m%d_%H%M%S")"
 OUT_BASE="${REAL_LP_OUT_DIR:-${ROOT_DIR}/results/real_lp_${STAMP}}"
 MANIFEST_PATH="${MANIFEST_PATH:-${ROOT_DIR}/benchmarks/datasets/real_lp_manifest.csv}"
 mkdir -p "${OUT_BASE}"
+read -r -a SOLVER_ARR <<< "${SOLVERS}"
 
 TARGET_SECONDS="$(python - <<PY
 h = float(${TARGET_HOURS})
@@ -60,11 +66,16 @@ run_case() {
   if python "${ROOT_DIR}/benchmarks/reproduce_real_lp.py" \
     --manifest "${MANIFEST_PATH}" \
     --output "${case_dir}" \
+    --solvers "${SOLVER_ARR[@]}" \
     --warmups "${WARMUPS}" \
     --repeats "${REPEATS}" \
     --target-tol "${TARGET_TOL}" \
     --batch-size "${BATCH_SIZE}" \
     --u-cap "${U_CAP}" \
+    --ipm-max-iters "${IPM_MAX_ITERS}" \
+    --robust-max-iters "${ROBUST_MAX_ITERS}" \
+    --split-max-iters "${SPLIT_MAX_ITERS}" \
+    --lp-max-iters "${LP_MAX_ITERS}" \
     --parse-timeout-s "${PARSE_TIMEOUT_S}" \
     --solve-timeout-s "${SOLVE_TIMEOUT_S}" \
     --instance-timeout-s "${INSTANCE_TIMEOUT_S}" \
@@ -173,4 +184,3 @@ python "${ROOT_DIR}/benchmarks/aggregate_real_lp.py" \
 echo "[real-lp] done"
 echo "[real-lp] output base: ${OUT_BASE}"
 echo "[real-lp] manifest: ${MANIFEST}"
-
