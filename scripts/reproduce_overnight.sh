@@ -93,13 +93,16 @@ done
 python - "${OUT_BASE}" <<'PY'
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from pathlib import Path
 
 base = Path(sys.argv[1])
 out = base / "combined_results.jsonl"
-count = 0
+manifest = base / "manifest.csv"
+data_rows = 0
+failure_rows = 0
 with out.open("w", encoding="utf-8") as f_out:
     for case_dir in sorted(base.iterdir()):
         if not case_dir.is_dir():
@@ -117,8 +120,44 @@ with out.open("w", encoding="utf-8") as f_out:
                 md["overnight_case"] = case_dir.name
                 row["metadata"] = md
                 f_out.write(json.dumps(row) + "\n")
-                count += 1
-print(f"combined rows: {count}")
+                data_rows += 1
+
+    if manifest.exists():
+        with manifest.open("r", encoding="utf-8", newline="") as f_m:
+            for rec in csv.DictReader(f_m):
+                case_name = str(rec.get("case", "")).strip()
+                status = str(rec.get("status", "")).strip().lower()
+                if not case_name or status == "ok":
+                    continue
+                try:
+                    duration_s = float(rec.get("duration_s", "nan"))
+                except Exception:
+                    duration_s = float("nan")
+                row = {
+                    "run_id": f"{case_name}_case_failure",
+                    "category": "meta",
+                    "problem_id": case_name,
+                    "solver": "__case_failure__",
+                    "status": status or "failed",
+                    "timing": {
+                        "median_s": duration_s,
+                        "p90_s": duration_s,
+                        "repeats": 1,
+                    },
+                    "metrics": {},
+                    "metadata": {
+                        "overnight_case": case_name,
+                        "case_status": status or "failed",
+                        "case_duration_s": duration_s,
+                        "case_output_dir": rec.get("output_dir"),
+                        "case_args": rec.get("args"),
+                        "source": "manifest",
+                    },
+                    "system": {"kind": "case_status_marker"},
+                }
+                f_out.write(json.dumps(row) + "\n")
+                failure_rows += 1
+print(f"combined rows: {data_rows + failure_rows} (data={data_rows}, failure_markers={failure_rows})")
 PY
 
 mkdir -p "${OUT_BASE}/combined"

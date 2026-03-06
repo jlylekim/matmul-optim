@@ -17,6 +17,17 @@ def _qp_primal_residual(A: np.ndarray, l: np.ndarray, u: np.ndarray, x: np.ndarr
     return numer / max(denom, 1e-12)
 
 
+def _failed_result(name: str, error: Exception, *, solve_time_s: float = 0.0) -> BaselineResult:
+    return BaselineResult(
+        name=name,
+        status="failed",
+        solve_time_s=float(max(0.0, solve_time_s)),
+        metrics={"primal_residual": float("nan"), "dual_residual": float("nan"), "duality_gap": float("nan")},
+        device="cpu",
+        metadata={"error_type": type(error).__name__, "error_message": str(error)},
+    )
+
+
 def run_osqp_qp(problem: DenseBatchQP, config: BaselineRunConfig | None = None) -> BaselineResult:
     cfg = config or BaselineRunConfig()
     try:
@@ -37,21 +48,24 @@ def run_osqp_qp(problem: DenseBatchQP, config: BaselineRunConfig | None = None) 
 
     solver = osqp.OSQP()
     t0 = time.perf_counter()
-    solver.setup(
-        P=sp.csc_matrix(P),
-        q=q,
-        A=sp.csc_matrix(A),
-        l=l,
-        u=u,
-        eps_abs=min(cfg.tol_p, cfg.tol_d),
-        eps_rel=min(cfg.tol_p, cfg.tol_d),
-        max_iter=cfg.max_iters,
-        warm_start=cfg.warm_start,
-        verbose=False,
-        polish=False,
-    )
-    result = solver.solve()
-    solve_time = time.perf_counter() - t0
+    try:
+        solver.setup(
+            P=sp.csc_matrix(P),
+            q=q,
+            A=sp.csc_matrix(A),
+            l=l,
+            u=u,
+            eps_abs=min(cfg.tol_p, cfg.tol_d),
+            eps_rel=min(cfg.tol_p, cfg.tol_d),
+            max_iter=cfg.max_iters,
+            warm_start=cfg.warm_start,
+            verbose=False,
+            polish=False,
+        )
+        result = solver.solve()
+        solve_time = time.perf_counter() - t0
+    except Exception as exc:
+        return _failed_result("OSQP", exc, solve_time_s=time.perf_counter() - t0)
 
     info: Any = result.info
     status = str(info.status)
@@ -109,22 +123,25 @@ def run_scipy_trust_constr_qp(problem: DenseBatchQP, config: BaselineRunConfig |
         return P
 
     t0 = time.perf_counter()
-    result = minimize(
-        fun=fun,
-        x0=x0,
-        method="trust-constr",
-        jac=jac,
-        hess=hess,
-        constraints=[linear],
-        options={
-            "maxiter": int(cfg.max_iters),
-            "gtol": float(min(cfg.tol_p, cfg.tol_d)),
-            "xtol": float(min(cfg.tol_p, cfg.tol_d)),
-            "barrier_tol": float(cfg.tol_g),
-            "verbose": 0,
-        },
-    )
-    solve_time = time.perf_counter() - t0
+    try:
+        result = minimize(
+            fun=fun,
+            x0=x0,
+            method="trust-constr",
+            jac=jac,
+            hess=hess,
+            constraints=[linear],
+            options={
+                "maxiter": int(cfg.max_iters),
+                "gtol": float(min(cfg.tol_p, cfg.tol_d)),
+                "xtol": float(min(cfg.tol_p, cfg.tol_d)),
+                "barrier_tol": float(cfg.tol_g),
+                "verbose": 0,
+            },
+        )
+        solve_time = time.perf_counter() - t0
+    except Exception as exc:
+        return _failed_result("SciPyTrustConstr", exc, solve_time_s=time.perf_counter() - t0)
 
     msg = str(result.message).lower()
     if bool(result.success):
@@ -186,39 +203,42 @@ def run_highs_lp(problem: DenseBatchLP, config: BaselineRunConfig | None = None)
     lp.setOptionValue("simplex_iteration_limit", cfg.max_iters)
 
     inf = highspy.kHighsInf
-    lp.addCols(
-        n,
-        c.tolist(),
-        [0.0] * n,
-        [inf] * n,
-        0,
-        [],
-        [],
-        [],
-    )
+    try:
+        lp.addCols(
+            n,
+            c.tolist(),
+            [0.0] * n,
+            [inf] * n,
+            0,
+            [],
+            [],
+            [],
+        )
 
-    starts = [0]
-    indices: list[int] = []
-    values: list[float] = []
-    for i in range(m):
-        nz = np.nonzero(A[i])[0]
-        indices.extend(int(j) for j in nz)
-        values.extend(float(A[i, j]) for j in nz)
-        starts.append(len(indices))
+        starts = [0]
+        indices: list[int] = []
+        values: list[float] = []
+        for i in range(m):
+            nz = np.nonzero(A[i])[0]
+            indices.extend(int(j) for j in nz)
+            values.extend(float(A[i, j]) for j in nz)
+            starts.append(len(indices))
 
-    lp.addRows(
-        m,
-        b.tolist(),
-        b.tolist(),
-        len(indices),
-        starts,
-        indices,
-        values,
-    )
+        lp.addRows(
+            m,
+            b.tolist(),
+            b.tolist(),
+            len(indices),
+            starts,
+            indices,
+            values,
+        )
 
-    t0 = time.perf_counter()
-    lp.run()
-    solve_time = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        lp.run()
+        solve_time = time.perf_counter() - t0
+    except Exception as exc:
+        return _failed_result("HiGHS", exc)
 
     status = lp.modelStatusToString(lp.getModelStatus())
     info = lp.getInfo()

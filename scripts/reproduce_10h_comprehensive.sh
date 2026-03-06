@@ -36,6 +36,7 @@ run_case() {
   local case_name="$1"
   shift
   local case_dir="${OUT_BASE}/${case_name}"
+  local case_log="${case_dir}/run.log"
   mkdir -p "${case_dir}"
 
   local now elapsed
@@ -62,7 +63,7 @@ run_case() {
     --ns-grid-tune-batch "${NS_GRID_TUNE_BATCH}" \
     --ns-grid-tune-iters "${NS_GRID_TUNE_ITERS}" \
     --eval-tiers 1e-1 5e-2 1e-2 \
-    "$@"; then
+    "$@" 2>&1 | tee "${case_log}"; then
     status="ok"
   else
     status="failed"
@@ -88,7 +89,13 @@ run_case() {
 for preset in a100_heavy stress mixed ns_favor large; do
   for seed in 0 1 2 3; do
     case_name="${preset}_s${seed}"
-    run_case "${case_name}" --preset "${preset}" --seed "${seed}" || break 2
+    extra_args=()
+    # In distributed mode, heavy/mixed + rank-0 CPU baselines are brittle and
+    # can dominate wall-time. Keep these cases GPU-focused for reliable sweeps.
+    if [[ "${preset}" == "a100_heavy" || "${preset}" == "mixed" ]]; then
+      extra_args+=(--skip-cpu-baselines)
+    fi
+    run_case "${case_name}" --preset "${preset}" --seed "${seed}" "${extra_args[@]}" || break 2
   done
 done
 
@@ -96,13 +103,16 @@ done
 python - "${OUT_BASE}" <<'PY'
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from pathlib import Path
 
 base = Path(sys.argv[1])
 out = base / "combined_results.jsonl"
-count = 0
+manifest = base / "manifest.csv"
+data_rows = 0
+failure_rows = 0
 with out.open("w", encoding="utf-8") as f_out:
     for case_dir in sorted(base.iterdir()):
         if not case_dir.is_dir():
@@ -120,8 +130,44 @@ with out.open("w", encoding="utf-8") as f_out:
                 md["comprehensive_case"] = case_dir.name
                 row["metadata"] = md
                 f_out.write(json.dumps(row) + "\n")
-                count += 1
-print(f"combined rows: {count}")
+                data_rows += 1
+
+    if manifest.exists():
+        with manifest.open("r", encoding="utf-8", newline="") as f_m:
+            for rec in csv.DictReader(f_m):
+                case_name = str(rec.get("case", "")).strip()
+                status = str(rec.get("status", "")).strip().lower()
+                if not case_name or status == "ok":
+                    continue
+                try:
+                    duration_s = float(rec.get("duration_s", "nan"))
+                except Exception:
+                    duration_s = float("nan")
+                row = {
+                    "run_id": f"{case_name}_case_failure",
+                    "category": "meta",
+                    "problem_id": case_name,
+                    "solver": "__case_failure__",
+                    "status": status or "failed",
+                    "timing": {
+                        "median_s": duration_s,
+                        "p90_s": duration_s,
+                        "repeats": 1,
+                    },
+                    "metrics": {},
+                    "metadata": {
+                        "comprehensive_case": case_name,
+                        "case_status": status or "failed",
+                        "case_duration_s": duration_s,
+                        "case_output_dir": rec.get("output_dir"),
+                        "case_args": rec.get("args"),
+                        "source": "manifest",
+                    },
+                    "system": {"kind": "case_status_marker"},
+                }
+                f_out.write(json.dumps(row) + "\n")
+                failure_rows += 1
+print(f"combined rows: {data_rows + failure_rows} (data={data_rows}, failure_markers={failure_rows})")
 PY
 
 # Combined views: all, QP-only, LP-only.

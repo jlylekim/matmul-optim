@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import torch
@@ -28,15 +29,20 @@ def init_distributed(backend: str = "nccl") -> DistInfo:
         return DistInfo()
 
     if not dist.is_initialized():
+        pg_timeout = timedelta(hours=12)
         if torch.cuda.is_available():
             # Newer torch versions can record the rank->device mapping at init;
             # fallback keeps compatibility with older versions.
             try:
-                dist.init_process_group(backend=backend, device_id=torch.device(f"cuda:{local_rank}"))
+                dist.init_process_group(
+                    backend=backend,
+                    device_id=torch.device(f"cuda:{local_rank}"),
+                    timeout=pg_timeout,
+                )
             except TypeError:
-                dist.init_process_group(backend=backend)
+                dist.init_process_group(backend=backend, timeout=pg_timeout)
         else:
-            dist.init_process_group(backend=backend)
+            dist.init_process_group(backend=backend, timeout=pg_timeout)
 
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)

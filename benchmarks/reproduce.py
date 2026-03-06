@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from benchmarks.generators.batched_lp import BatchedLPConfig, generate_batched_lp
 from benchmarks.generators.dense_parametric_qp import DenseParametricQPConfig, generate_dense_parametric_qp
@@ -683,6 +684,8 @@ def _maybe_autolaunch_torchrun(args: argparse.Namespace) -> None:
         cmd.append("--disable-ns-grid-search")
     if args.skip_splitting:
         cmd.append("--skip-splitting")
+    if args.skip_cpu_baselines:
+        cmd.append("--skip-cpu-baselines")
     if args.focus_ns_baselines:
         cmd.append("--focus-ns-baselines")
     if args.eval_tiers:
@@ -744,6 +747,11 @@ def main() -> None:
         help="Skip gemm_splitting_qp runs",
     )
     parser.add_argument(
+        "--skip-cpu-baselines",
+        action="store_true",
+        help="Skip CPU baseline wrappers (SciPy/OSQP/HiGHS)",
+    )
+    parser.add_argument(
         "--focus-ns-baselines",
         action="store_true",
         help="Run only NS-IPM variants + reliable CPU QP baselines (skip splitting/portfolio/LP)",
@@ -799,7 +807,7 @@ def main() -> None:
     include_splitting = not args.skip_splitting
     include_portfolio = True
     include_lp = True
-    include_cpu_baselines = True
+    include_cpu_baselines = not args.skip_cpu_baselines
     if args.focus_ns_baselines:
         include_splitting = False
         include_portfolio = False
@@ -836,6 +844,27 @@ def main() -> None:
     lp_solver = LPFirstOrderSolver(lp_cfg) if include_lp else None
 
     records: list[Any] = []
+    results_path = out_dir / "results.jsonl"
+
+    def _persist_records() -> None:
+        if rank == 0:
+            write_jsonl(records, results_path)
+
+    def _append_record(rec: Any | None) -> None:
+        if rec is None:
+            return
+        records.append(rec)
+        _persist_records()
+
+    def _rank_barrier() -> None:
+        if world_size <= 1:
+            return
+        if not dist.is_available() or not dist.is_initialized():
+            return
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[local_rank])
+        else:
+            dist.barrier()
 
     studies: list[str]
     if args.study == "all":
@@ -977,7 +1006,7 @@ def main() -> None:
                 },
             )
             if rec is not None:
-                records.append(rec)
+                _append_record(rec)
                 _log_end("gemm_ipm_ns", rec.status, rec.timing.median_s)
 
             if not _reserve_slot():
@@ -1006,7 +1035,7 @@ def main() -> None:
                 },
             )
             if rec is not None:
-                records.append(rec)
+                _append_record(rec)
                 _log_end("gemm_ipm_robust", rec.status, rec.timing.median_s)
 
             if include_splitting and split is not None:
@@ -1035,10 +1064,11 @@ def main() -> None:
                     },
                 )
                 if rec is not None:
-                    records.append(rec)
+                    _append_record(rec)
                     _log_end("gemm_splitting_qp", rec.status, rec.timing.median_s)
 
             if study == "main" and include_cpu_baselines:
+                _rank_barrier()
                 if not _reserve_slot():
                     stop_all = True
                     break
@@ -1066,7 +1096,7 @@ def main() -> None:
                         tol_g=bcfg.tol_g,
                     )
                     if scipy_row is not None:
-                        records.append(scipy_row)
+                        _append_record(scipy_row)
                         _log_end("scipy_trust_constr_cpu", scipy_row["status"], float(scipy_row["timing"]["median_s"]))
                     else:
                         _log_end("scipy_trust_constr_cpu", "unavailable", None)
@@ -1089,10 +1119,11 @@ def main() -> None:
                         tol_g=bcfg.tol_g,
                     )
                     if osqp_row is not None:
-                        records.append(osqp_row)
+                        _append_record(osqp_row)
                         _log_end("osqp_cpu", osqp_row["status"], float(osqp_row["timing"]["median_s"]))
                     else:
                         _log_end("osqp_cpu", "unavailable", None)
+                _rank_barrier()
 
         if stop_all:
             break
@@ -1131,7 +1162,7 @@ def main() -> None:
                     },
                 )
                 if rec is not None:
-                    records.append(rec)
+                    _append_record(rec)
                     _log_end("gemm_ipm_robust", rec.status, rec.timing.median_s)
 
         if study == "main" and include_lp and lp_solver is not None:
@@ -1166,7 +1197,7 @@ def main() -> None:
                     },
                 )
                 if rec is not None:
-                    records.append(rec)
+                    _append_record(rec)
                     _log_end("lp_first_order_gpu", rec.status, rec.timing.median_s)
 
                 if not include_cpu_baselines:
@@ -1174,6 +1205,7 @@ def main() -> None:
                 if not _reserve_slot():
                     stop_all = True
                     break
+                _rank_barrier()
                 if rank == 0:
                     lp_cpu = lp.slice_batch(0, 1).to("cpu")
                     _log_start("highs_cpu", problem_id)
@@ -1193,15 +1225,16 @@ def main() -> None:
                         tol_g=None,
                     )
                     if highs_row is not None:
-                        records.append(highs_row)
+                        _append_record(highs_row)
                         _log_end("highs_cpu", highs_row["status"], float(highs_row["timing"]["median_s"]))
                     else:
                         _log_end("highs_cpu", "unavailable", None)
+                _rank_barrier()
 
     if rank == 0:
-        write_jsonl(records, out_dir / "results.jsonl")
+        _persist_records()
         print(f"Completed {progress}/{total_experiments} planned experiments")
-        print(f"Wrote {len(records)} records to {out_dir / 'results.jsonl'}")
+        print(f"Wrote {len(records)} records to {results_path}")
 
 
 if __name__ == "__main__":
