@@ -3,7 +3,11 @@ from __future__ import annotations
 import gzip
 from pathlib import Path
 
-from benchmarks.datasets.fetch_lp_suites import extract_dataset_links, expand_raw_file, sha256_file
+from benchmarks.datasets.fetch_lp_suites import (
+    extract_dataset_links,
+    expand_raw_file,
+    sha256_file,
+)
 
 
 def test_extract_dataset_links_filters_supported_files() -> None:
@@ -16,11 +20,27 @@ def test_extract_dataset_links_filters_supported_files() -> None:
       <a href="#anchor">anchor</a>
     </body></html>
     """
-    urls = extract_dataset_links(html, base_url="https://netlib.org/lp/data/")
+    urls = extract_dataset_links(html, base_url="https://netlib.org/lp/data/", suite="netlib")
     assert "https://netlib.org/lp/data/afiro.mps.gz" in urls
     assert "https://netlib.org/lp/data/blend.sif" in urls
     assert "http://example.com/foo.MPS" in urls
     assert not any(u.endswith("readme.txt") for u in urls)
+
+
+def test_extract_dataset_links_includes_netlib_extensionless_instances() -> None:
+    html = """
+    <html><body>
+      <a href="afiro">afiro</a>
+      <a href="emps.c">emps.c</a>
+      <a href="netlib.html">netlib.html</a>
+      * file: fit2d
+      * lang: compressed MPS
+    </body></html>
+    """
+    urls = extract_dataset_links(html, base_url="https://netlib.org/lp/data/", suite="netlib")
+    assert "https://netlib.org/lp/data/afiro" in urls
+    assert "https://netlib.org/lp/data/fit2d" in urls
+    assert "https://netlib.org/lp/data/emps.c" not in urls
 
 
 def test_expand_raw_file_gzip_roundtrip(tmp_path: Path) -> None:
@@ -32,4 +52,3 @@ def test_expand_raw_file_gzip_roundtrip(tmp_path: Path) -> None:
     expand_raw_file(raw, expanded)
     assert expanded.read_bytes() == payload
     assert len(sha256_file(raw)) == 64
-
