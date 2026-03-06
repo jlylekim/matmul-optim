@@ -101,6 +101,26 @@ Useful overrides:
 TARGET_HOURS=10 MAX_EXPERIMENTS_PER_CASE=0 REPEATS=7 WARMUPS=2 bash scripts/reproduce_10h_comprehensive.sh
 ```
 
+Fetch real LP suites (NETLIB/STOCHLP/MISC) and build canonical cache:
+
+```bash
+bash scripts/fetch_real_lp.sh
+```
+
+Run real-LP benchmark runner directly:
+
+```bash
+python benchmarks/reproduce_real_lp.py \
+  --manifest benchmarks/datasets/real_lp_manifest.csv \
+  --output results/real_lp_manual_$(date +%Y%m%d_%H%M%S)
+```
+
+Run a 10-hour real-LP sweep:
+
+```bash
+bash scripts/reproduce_real_lp_10h.sh
+```
+
 `benchmarks/reproduce.py` auto-launches `torchrun` across all visible GPUs by default.
 By default, each reproduce invocation is capped at `10` experiments total (`--max-experiments`).
 NS-IPM hyperparameter grid search is enabled by default and can be disabled with `--disable-ns-grid-search`.
@@ -127,6 +147,7 @@ Results are written to timestamped directories under `results/` (for example `re
 - markdown + LaTeX summary table (`summary_table.*`) with accuracy/time only
 - PDF plots (`accuracy_vs_time.pdf`) with accuracy/time only
 - overnight runs additionally save `manifest.csv` and `combined_results.jsonl` and filter plots to QP NS-vs-baseline solvers
+- real-LP runs save per-rank JSONL shard files (`results_rank*.jsonl`), merged `results.jsonl`, and explicit failure rows for parse/conversion/solver errors
 
 ## Repository layout
 
